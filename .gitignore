@@ -1,0 +1,13 @@
+.idea
+__pycache__
+data
+data_old
+runs
+weights
+*.pth
+*.pt
+**/*.pyc
+**/*.pyo
+wandb
+plots/media
+plots/artifacts
