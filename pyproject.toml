@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "conceptformer"
+version = "2.0.0"
+description = "ConceptFormer: Learning concept embeddings from knowledge graphs for LLM augmentation"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.2.0",
+    "transformers>=4.40.0",
+    "accelerate>=0.30.0",
+    "datasets>=2.18.0",
+    "networkx>=3.2",
+    "h5py>=3.10.0",
+    "numpy>=1.26.0",
+    "wandb>=0.16.0",
+    "tqdm>=4.66.0",
+    "fuzzywuzzy>=0.18.0",
+    "python-Levenshtein>=0.23.0",
+    "SPARQLWrapper>=2.0.0",
+    "safetensors>=0.4.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.3.0",
+]
+
+[project.scripts]
+train-conceptformer = "conceptformer.train:main"
+eval-conceptformer = "conceptformer.evaluate:main"
+
+[tool.setuptools.packages.find]
+include = ["conceptformer*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
