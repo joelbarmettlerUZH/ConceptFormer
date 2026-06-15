@@ -37,6 +37,7 @@ infer = [
     "torch>=2.4",
     "transformers>=4.51",
     "accelerate>=0.30",
+    "wandb>=0.18",
 ]
 
 [build-system]

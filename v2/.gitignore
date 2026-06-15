@@ -4,7 +4,9 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 # Local data artifacts (keep large data off git and off /home; see CF_DATA_ROOT).
-data/
+# Anchored to repo root so it does NOT match the src/conceptformer/data/ package.
+/data/
 *.sqlite
 *.jsonl
 *.parquet
+wandb/

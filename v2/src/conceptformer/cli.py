@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -195,10 +196,13 @@ def eval_popqa(
 def select_entities_cmd(
     n: Annotated[int, typer.Option(help="How many entities to select")] = 20000,
     name: Annotated[str, typer.Option(help="Output set name")] = "cf_train_pilot",
+    balanced: Annotated[bool, typer.Option(help="cover full popularity spectrum (vs tail-heavy)")] = False,  # noqa: E501
     seed: Annotated[int, typer.Option(help="Sampling seed")] = 0,
 ) -> None:
-    """Select a tail-heavy CF-Train entity pool from the danker PageRank file (eval-excluded)."""
+    """Select a CF-Train entity pool from the danker PageRank file (eval-excluded)."""
     from conceptformer.data.select import (
+        BALANCED_FRACS,
+        SAMPLE_FRACS,
         download_pagerank,
         load_pagerank,
         manifest,
@@ -209,7 +213,9 @@ def select_entities_cmd(
     path = download_pagerank()
     entries = load_pagerank(path)
     exclude = subject_qids(iter(load_popqa()))  # never train on eval subjects
-    selected = select_entities(entries, n=n, exclude=exclude, seed=seed)
+    fracs = BALANCED_FRACS if balanced else SAMPLE_FRACS
+    rprint(f"sampling {'balanced' if balanced else 'tail-heavy'} low/mid/high={fracs}")
+    selected = select_entities(entries, n=n, exclude=exclude, seed=seed, sample_fracs=fracs)
 
     out_dir = settings.data_root / "cf_train" / name
     save_entities(selected, out_dir / "entities.jsonl")
@@ -284,7 +290,7 @@ def extract_teacher_paths(
         teacher_prompt,
     )
     from conceptformer.model.chat import ChatModel
-    from conceptformer.verbalize import verbalize_budgeted
+    from conceptformer.verbalize import verbalize_with_answer
 
     qa_dir = settings.data_root / "cf_train" / dataset
     rows = load_cftrain_qa(qa_dir / "qa_tiered.jsonl")
@@ -295,7 +301,8 @@ def extract_teacher_paths(
     prompts = []
     for r in rows:
         sg = sg_by_qid.get(r.subject_qid)
-        facts = verbalize_budgeted(sg, chat.count_tokens, budget) if sg else ""
+        # Guarantee the answer's edge is in the teacher's facts (large neighborhoods can cut it).
+        facts = verbalize_with_answer(sg, r.answer_qid, chat.count_tokens, budget) if sg else ""
         prompts.append(teacher_prompt(r.question, facts))
 
     ids = chat.generate_batch_ids(prompts, max_new_tokens=max_new_tokens, batch_size=batch_size)
@@ -355,7 +362,7 @@ def tier_cftrain(
     from conceptformer.generate.signal import answer_ok, apply_keep_policy, assign_tier
     from conceptformer.generate.teacher import CFTRAIN_PROMPT_VERSION, cftrain_prompt
     from conceptformer.model.chat import ChatModel
-    from conceptformer.verbalize import verbalize_budgeted
+    from conceptformer.verbalize import verbalize_with_answer
 
     qa_dir = settings.data_root / "cf_train" / dataset
     rows = load_cftrain_qa(qa_dir / "qa.jsonl")
@@ -371,7 +378,9 @@ def tier_cftrain(
     rag_prompts = []
     for r in qa:
         sg = sg_by_qid.get(r.subject_qid)
-        facts = verbalize_budgeted(sg, chat.count_tokens, budget) if sg else ""
+        # Answer-guaranteed facts: the tier signal must reflect "graph has the fact", not
+        # "the fact survived the top-PageRank budget cut".
+        facts = verbalize_with_answer(sg, r.answer_qid, chat.count_tokens, budget) if sg else ""
         rag_prompts.append(cftrain_prompt(r.question, facts))
 
     base_preds = chat.generate_batch(base_prompts, batch_size=batch_size)
@@ -583,7 +592,7 @@ def cf_overfit(
     rows = [r for r in load_cftrain_qa(qa_dir / "qa_distill.jsonl") if r.teacher_target_ids]
     sg_by_qid = {sg.center.qid: sg for sg in iter_subgraphs(settings.snapshots_dir / snapshot)}
     batch = [
-        (sg_by_qid[r.subject_qid], r.question, r.teacher_target_ids or [])
+        (sg_by_qid[r.subject_qid], r.question, r.teacher_target_ids or [], r.answer_qid)
         for r in rows[:n]
         if r.subject_qid in sg_by_qid
     ]
@@ -611,6 +620,10 @@ def cf_train(
     snapshot: Annotated[str, typer.Option(help="matching snapshot")] = "cftrain_smoke",
     model: Annotated[str, typer.Option(help="frozen backbone")] = "Qwen/Qwen3-0.6B",
     k: Annotated[int, typer.Option(help="concept tokens")] = 8,
+    d_model: Annotated[int, typer.Option(help="encoder width")] = 512,
+    n_layers: Annotated[int, typer.Option(help="resampler layers")] = 2,
+    lr: Annotated[float, typer.Option(help="encoder learning rate")] = 1e-4,
+    temperature: Annotated[float, typer.Option(help="KL distillation temperature")] = 1.0,
     steps: Annotated[int, typer.Option()] = 600,
     batch: Annotated[int, typer.Option(help="minibatch size")] = 8,
     val_frac: Annotated[float, typer.Option(help="held-out question fraction")] = 0.3,
@@ -620,6 +633,11 @@ def cf_train(
     popqa_snapshot: Annotated[str, typer.Option(help="snapshot with PopQA neighborhoods")] = "popqa_full",  # noqa: E501
     checkpoint: Annotated[str, typer.Option(help="save trained encoder under this name")] = "",
     augment: Annotated[bool, typer.Option(help="distill under many system prompts")] = False,
+    subsample: Annotated[bool, typer.Option(help="re-sample teacher distractors/step")] = False,
+    metrics_out: Annotated[str, typer.Option(help="write final metrics JSON to this path")] = "",
+    wandb: Annotated[bool, typer.Option(help="log to Weights & Biases")] = False,
+    wandb_project: Annotated[str, typer.Option()] = "conceptformer-v2",
+    wandb_group: Annotated[str, typer.Option(help="group runs (e.g. a sweep name)")] = "",
     seed: Annotated[int, typer.Option()] = 0,
     device: Annotated[str, typer.Option()] = "cuda",
 ) -> None:
@@ -644,7 +662,7 @@ def cf_train(
     sg_by_qid = {sg.center.qid: sg for sg in iter_subgraphs(settings.snapshots_dir / snapshot)}
     train_rows, val_rows = split_by_held_out_questions(rows, val_frac=val_frac, seed=seed)
     train_tuples = [
-        (sg_by_qid[r.subject_qid], r.question, r.teacher_target_ids)
+        (sg_by_qid[r.subject_qid], r.question, r.teacher_target_ids, r.answer_qid)
         for r in train_rows
         if r.subject_qid in sg_by_qid and r.teacher_target_ids
     ]
@@ -662,34 +680,82 @@ def cf_train(
     # rarely truncates, and it bounds the padded (B, L, V) logits tensor's memory.
     cfg = TrainConfig(
         k=k,
+        d_model=d_model,
+        n_layers=n_layers,
+        lr=lr,
+        temperature=temperature,
         warmup_steps=max(10, steps // 20),
         total_steps=steps,
         rag_context_tokens=1024,
         augment_systems=AUGMENT_SYSTEMS if augment else (),
+        subsample_neighbors=subsample,
+        seed=seed,
     )
     trainer = ConceptTrainer(backbone, cfg)
+
+    wb = None
+    if wandb:
+        import wandb as _wandb
+
+        wb = _wandb.init(
+            project=wandb_project,
+            group=wandb_group or None,
+            name=checkpoint or None,
+            config={
+                "k": k, "d_model": d_model, "n_layers": n_layers, "lr": lr,
+                "temperature": temperature, "steps": steps, "batch": batch,
+                "augment": augment, "dataset": dataset, "snapshot": snapshot,
+                "trainable_params": sum(p.numel() for p in trainer.model.parameters()),
+            },
+        )
+
     # When augmenting, evaluate under a HELD-OUT prompt (decoupling test); else the training prompt.
     eval_system = HELD_OUT_EVAL_SYSTEM if augment else TEACHER_SYSTEM
     if augment:
         rprint(f"[cyan]prompt augmentation ON[/] ({len(AUGMENT_SYSTEMS)} systems); "
                f"eval under HELD-OUT prompt: {eval_system!r}")
 
-    def report(tag: str) -> None:
+    last_metrics: dict = {}
+
+    def report(tag: str, step: int = 0) -> dict:
         m = trainer.evaluate()
+        last_metrics.update(m)
         rprint(
             f"  [{tag}] val_KL={m['val_kl']:.3f}  "
             f"[bold]concept_acc={m['concept_acc']:.1%}[/]  "
             f"base={m['base_acc']:.1%}  teacher(RAG)={m['teacher_acc']:.1%}  (n={m['n_acc']})"
         )
+        if wb:
+            gates = trainer.gate_values()
+            wb.log(
+                {
+                    "held_out/concept_acc": m["concept_acc"],
+                    "held_out/base_acc": m["base_acc"],
+                    "held_out/teacher_acc": m["teacher_acc"],
+                    "held_out/val_kl": m["val_kl"],
+                    "gate/max": max(gates),
+                    "gate/min": min(gates),
+                },
+                step=step,
+            )
+        return m
 
-    rprint("[dim]preprocessing (featurize + tokenize once) + static eval brackets…[/dim]")
-    prepared = trainer.prepare(train_tuples)  # hoists CPU work out of the training loop
+    if subsample:
+        rprint("[dim]subsample mode: features cached, teacher facts re-sampled each step…[/dim]")
+        train_pool: list = train_tuples  # raw 4-tuples; teacher rebuilt live per step
+        step_fn = trainer.step
+    else:
+        rprint("[dim]preprocessing (featurize + tokenize once)…[/dim]")
+        train_pool = trainer.prepare(train_tuples)  # hoists CPU work out of the training loop
+        step_fn = trainer.step_prepared
     trainer.setup_eval(eval_val, sg_by_qid, eval_system=eval_system)  # brackets computed once
-    report("init")
+    report("init", 0)
     for s in range(1, steps + 1):
-        trainer.step_prepared(rng.sample(prepared, min(batch, len(prepared))))
+        loss = step_fn(rng.sample(train_pool, min(batch, len(train_pool))))
+        if wb and s % 25 == 0:
+            wb.log({"train/loss": loss, "train/lr": trainer.opt.param_groups[0]["lr"]}, step=s)
         if s % eval_every == 0 or s == steps:
-            report(f"step {s}")
+            report(f"step {s}", s)
 
     # Held-IN accuracy (a sample of TRAINED questions) disambiguates overfitting from underfitting.
     from conceptformer.train.harness import is_answerable
@@ -702,6 +768,10 @@ def cf_train(
         f"  [held-IN sample] concept_acc={tm['concept_acc']:.1%}  KL={tm['val_kl']:.3f}  "
         f"(n={tm['n_acc']}) — high held-in + low held-out = overfit; both low = undertrained"
     )
+    if wb:
+        wb.summary["held_in/concept_acc"] = tm["concept_acc"]
+        wb.summary["held_in/val_kl"] = tm["val_kl"]
+        wb.summary["held_out/concept_acc_final"] = last_metrics.get("concept_acc")
 
     if checkpoint:
         ckpt_path = settings.data_root / "checkpoints" / f"{checkpoint}.pt"
@@ -721,7 +791,7 @@ def cf_train(
         for e in examples[: popqa_eval * 2]:  # over-sample; some neighborhoods may be empty
             sg = popqa_sgs[e.subject_qid]
             if sg.edges:
-                items.append((sg, e.question, e.answer_labels))
+                items.append((sg, e.question, e.answer_labels, e.answer_qid))
             if len(items) >= popqa_eval:
                 break
         rprint(f"[bold]PopQA (UNSEEN entities, n={len(items)})[/] — external generalization:")
@@ -730,8 +800,112 @@ def cf_train(
             f"  [bold]concept_acc={pm['concept_acc']:.1%}[/]  "
             f"base={pm['base_acc']:.1%}  teacher(RAG)={pm['teacher_acc']:.1%}"
         )
+        if wb:
+            wb.summary["popqa/concept_acc"] = pm["concept_acc"]
+            wb.summary["popqa/base_acc"] = pm["base_acc"]
+            wb.summary["popqa/teacher_acc"] = pm["teacher_acc"]
+
+    if wb:
+        wb.finish()
+
+    if metrics_out:
+        ho_keys = ("concept_acc", "base_acc", "teacher_acc", "val_kl")
+        result = {
+            "config": {"k": k, "steps": steps, "batch": batch, "augment": augment, "seed": seed},
+            "held_out": {kk: last_metrics.get(kk) for kk in ho_keys},
+            "held_in": {"concept_acc": tm["concept_acc"], "val_kl": tm["val_kl"]},
+            "popqa": (
+                {kk: pm[kk] for kk in ("concept_acc", "base_acc", "teacher_acc")}
+                if popqa_eval
+                else None
+            ),
+        }
+        out_path = Path(metrics_out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(result, indent=2))
+        rprint(f"[green]metrics[/] → {out_path}")
 
     rprint("[green]done[/] — concept_acc on HELD-OUT questions is the generalization signal.")
+
+
+@app.command("cf-sweep")
+def cf_sweep(
+    params: Annotated[str, typer.Option(help="spec: 'd-model=512,768,1024;n-layers=2,3,4'")],
+    dataset: Annotated[str, typer.Option()] = "cftrain_qa_1k",
+    snapshot: Annotated[str, typer.Option()] = "cftrain_1k",
+    steps: Annotated[int, typer.Option()] = 16000,
+    batch: Annotated[int, typer.Option()] = 32,
+    eval_n: Annotated[int, typer.Option()] = 96,
+    eval_every: Annotated[int, typer.Option(help="0 = quarter of steps (for curves)")] = 0,
+    popqa_eval: Annotated[int, typer.Option(help="PopQA examples per run (0=skip)")] = 0,
+    augment: Annotated[bool, typer.Option()] = False,
+    subsample: Annotated[bool, typer.Option(help="re-sample teacher distractors each step")] = True,
+    method: Annotated[str, typer.Option(help="grid / random / bayes")] = "bayes",
+    count: Annotated[int, typer.Option(help="max trials per agent (0=until stopped)")] = 0,
+    devices: Annotated[str, typer.Option(help="comma-separated GPUs")] = "cuda:0,cuda:1",
+    name: Annotated[str, typer.Option(help="sweep name")] = "sweep",
+    project: Annotated[str, typer.Option()] = "conceptformer-v2",
+    entity: Annotated[str, typer.Option()] = "university-of-zurich",
+) -> None:
+    """Create a W&B sweep over one or more cf-train hyperparameters; one agent per GPU.
+
+    ``params`` is ``;``-separated ``name=v1,v2,...`` groups (cf-train flag name, hyphenated), e.g.
+    ``--params "d-model=512,768,1024;n-layers=2,3,4"`` for a capacity grid.
+    """
+    import os
+    import subprocess
+
+    import wandb
+
+    def _coerce(v: str) -> object:
+        for cast in (int, float):
+            try:
+                return cast(v)
+            except ValueError:
+                pass
+        return v
+
+    parameters = {}
+    for group in params.split(";"):
+        name_, _, vals = group.partition("=")
+        parameters[name_.strip()] = {"values": [_coerce(v) for v in vals.split(",")]}
+
+    fixed = [
+        "--dataset", dataset, "--snapshot", snapshot,
+        "--steps", str(steps), "--batch", str(batch), "--eval-n", str(eval_n),
+        "--popqa-eval", str(popqa_eval), "--eval-every", str(eval_every or max(1, steps // 4)),
+        "--wandb", "--device", "cuda:0",
+    ]
+    if augment:
+        fixed.append("--augment")
+    if subsample:
+        fixed.append("--subsample")
+    sweep_config = {
+        "name": name,
+        "method": method,
+        "metric": {"name": "held_out/concept_acc", "goal": "maximize"},
+        "parameters": parameters,
+        "command": ["${env}", "python", "-m", "conceptformer.cli", "cf-train", *fixed, "${args}"],
+    }
+    sweep_id = wandb.sweep(sweep_config, project=project, entity=entity)
+    url = f"https://wandb.ai/{entity}/{project}/sweeps/{sweep_id}"
+    rprint(f"[green]created sweep[/] {url}")
+
+    log_dir = settings.data_root / "sweeps" / name
+    log_dir.mkdir(parents=True, exist_ok=True)
+    procs = []
+    for dev in devices.split(","):
+        gpu = dev.rsplit(":", 1)[-1]
+        env = {**os.environ, "CUDA_VISIBLE_DEVICES": gpu}
+        cmd = ["wandb", "agent", *(["--count", str(count)] if count else [])]
+        cmd.append(f"{entity}/{project}/{sweep_id}")
+        log = (log_dir / f"agent_gpu{gpu}.log").open("w")
+        procs.append(subprocess.Popen(cmd, env=env, stdout=log, stderr=subprocess.STDOUT))
+        rprint(f"  launched agent on GPU {gpu}")
+    rprint(f"[bold]running {len(procs)} agents[/] — live at {url}")
+    for p in procs:
+        p.wait()
+    rprint(f"[green]sweep done[/] {url}")
 
 
 if __name__ == "__main__":

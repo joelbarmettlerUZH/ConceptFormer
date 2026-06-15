@@ -16,6 +16,7 @@ batched/padded forward is a later optimization. See ``docs/MODEL_DESIGN.md`` §0
 from __future__ import annotations
 
 import math
+import random
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,7 +36,7 @@ from conceptformer.model.injection import build_position_ids, pack_embeddings
 from conceptformer.schemas import Subgraph
 from conceptformer.train.forcing import gather_path_logits
 from conceptformer.train.losses import sequence_cross_entropy, sequence_kl
-from conceptformer.verbalize import verbalize_budgeted
+from conceptformer.verbalize import verbalize_with_answer
 
 # Unique marker reserving the concept-token slot inside the rendered chat template.
 _SENTINEL = "\x00CF_CONCEPTS\x00"
@@ -81,6 +82,11 @@ class TrainConfig:
     # System prompts to distill under (prompt augmentation → prompt-agnostic vectors). Empty =
     # single-prompt (TEACHER_SYSTEM). Set to AUGMENT_SYSTEMS to decouple. Cache scales by the count.
     augment_systems: tuple[str, ...] = ()
+    # Neighbor-subsampling: re-sample the teacher's distractor facts each step (answer always kept)
+    # so the student must encode the whole neighborhood, not one fixed subset. Forces the live
+    # teacher path (no cache) since the teacher target varies per step.
+    subsample_neighbors: bool = False
+    seed: int = 0
 
 
 @dataclass
@@ -138,6 +144,7 @@ class ConceptTrainer:
         # System prompts for augmentation (defaults to a single neutral one if not augmenting).
         self._systems = list(config.augment_systems) or [TEACHER_SYSTEM]
         self._head_ids_by_system: dict[int, list[int]] = {}
+        self._sub_rng = random.Random(config.seed)  # re-samples distractors when subsampling
         # Held-out eval state (populated by setup_eval; brackets are static across training).
         self._eval_items: list = []
         self._eval_prepared: list[Prepared] = []
@@ -158,8 +165,18 @@ class ConceptTrainer:
     def _count_tokens(self, text: str) -> int:
         return len(self.bb.tokenizer.encode(text, add_special_tokens=False))
 
-    def _facts(self, sg: Subgraph) -> str:
-        return verbalize_budgeted(sg, self._count_tokens, self.cfg.rag_context_tokens)
+    def _facts(
+        self, sg: Subgraph, answer_qid: str | None = None, rng: random.Random | None = None
+    ) -> str:
+        # Guarantee the answer's edge is in the teacher's facts; ``rng`` re-samples distractors.
+        budget = self.cfg.rag_context_tokens
+        return verbalize_with_answer(sg, answer_qid, self._count_tokens, budget, rng)
+
+    def _cached_features(self, sg: Subgraph) -> SubgraphFeatures:
+        qid = sg.center.qid
+        if qid not in self._feat_cache:
+            self._feat_cache[qid] = featurize_subgraph(sg, self.bb.embed_labels)
+        return self._feat_cache[qid]
 
     def _render(self, system: str, user: str) -> str:
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -224,21 +241,21 @@ class ConceptTrainer:
             loss = loss + self.cfg.ce_weight * sequence_cross_entropy(student_g, targets, mask_m)
         return loss
 
-    def batch_loss(self, batch: list[tuple[Subgraph, str, list[int]]]) -> Tensor:
-        """Batched KL over a minibatch, recomputing preprocessing each step (no cache).
+    def batch_loss(self, batch: list[tuple[Subgraph, str, list[int], str | None]]) -> Tensor:
+        """Batched KL recomputing teacher facts each step — the live, no-teacher-cache path.
 
-        Used by quick/one-off runs (e.g. ``cf-overfit``). For long runs use ``prepare`` +
-        ``batch_loss_cached``, which hoists the deterministic tokenization/featurization out of the
-        step so it becomes GPU-bound.
+        Used for neighbor-subsampling (``subsample_neighbors``): facts are re-sampled every step
+        (answer guaranteed, distractors shuffled), so the teacher target varies and can't be cached.
+        Edge features are still cached (the encoder input is fixed). Also the ``cf-overfit`` path.
         """
-        batch = [(sg, q, p) for sg, q, p in batch if p]
-        feats = [featurize_subgraph(sg, self.bb.embed_labels) for sg, _, _ in batch]
-        concepts = self._encode_concepts(feats)
+        batch = [(sg, q, p, aq) for sg, q, p, aq in batch if p]
+        concepts = self._encode_concepts([self._cached_features(sg) for sg, *_ in batch])
         head_emb = self._embed(self._student_head_ids())
+        rng = self._sub_rng if self.cfg.subsample_neighbors else None
         teacher_embeds, teacher_ctx, path_lens = [], [], []
         student_embeds, student_ctx, paths = [], [], []
-        for i, (sg, question, path) in enumerate(batch):
-            facts = verbalize_budgeted(sg, self._count_tokens, self.cfg.rag_context_tokens)
+        for i, (sg, question, path, answer_qid) in enumerate(batch):
+            facts = self._facts(sg, answer_qid, rng)
             ctx_ids = self._ids(self._render(TEACHER_SYSTEM, f"{facts}\n\n{question}"))
             _, tail_text = self._render(TEACHER_SYSTEM, _SENTINEL + f"\n\n{question}").split(
                 _SENTINEL
@@ -263,21 +280,22 @@ class ConceptTrainer:
             self._head_ids_by_system[system_idx] = self._ids(head_text)
         return self._head_ids_by_system[system_idx]
 
-    def prepare(self, items: list[tuple[Subgraph, str, list[int]]]) -> list[Prepared]:
+    def prepare(self, items: list[tuple[Subgraph, str, list[int], str | None]]) -> list[Prepared]:
         """Deterministic preprocessing once, expanded over the augmentation system prompts.
 
-        Each example becomes one ``Prepared`` per system prompt (so training samples a diverse
-        prompt distribution). Entity edge features are cached once; the student tail is
-        system-agnostic; the teacher context (and cached hidden states) are per-system.
+        Items are ``(subgraph, question, path, answer_qid)``. Each example becomes one ``Prepared``
+        per system prompt (diverse prompt distribution); the teacher facts are answer-guaranteed.
+        Entity edge features are cached once; the student tail is system-agnostic; the teacher
+        context (and cached hidden states) are per-system.
         """
         prepared: list[Prepared] = []
-        for sg, question, path in items:
+        for sg, question, path, answer_qid in items:
             if not path:
                 continue
             qid = sg.center.qid
             if qid not in self._feat_cache:
                 self._feat_cache[qid] = featurize_subgraph(sg, self.bb.embed_labels)
-            facts = verbalize_budgeted(sg, self._count_tokens, self.cfg.rag_context_tokens)
+            facts = self._facts(sg, answer_qid)
             _, tail_text = self._render(self._systems[0], _SENTINEL + f"\n\n{question}").split(
                 _SENTINEL
             )
@@ -370,8 +388,8 @@ class ConceptTrainer:
             self.sched.step()
         return float(loss.detach())
 
-    def step(self, batch: list[tuple[Subgraph, str, list[int]]]) -> float:
-        """One optimizer step from raw ``(subgraph, question, path)`` (recomputes preprocessing)."""
+    def step(self, batch: list[tuple[Subgraph, str, list[int], str | None]]) -> float:
+        """One optimizer step from raw ``(subgraph, question, path, answer_qid)`` (live teacher)."""
         return self._apply(self.batch_loss(batch))
 
     def step_prepared(self, batch: list[Prepared]) -> float:
@@ -447,7 +465,8 @@ class ConceptTrainer:
         per-checkpoint ``evaluate`` then only runs the student. Returns the number of scorable rows.
         """
         items = [
-            (sg_by_qid[r.subject_qid], r.question, list(r.accepted_answers), r.teacher_target_ids)
+            (sg_by_qid[r.subject_qid], r.question, list(r.accepted_answers),
+             r.teacher_target_ids, r.answer_qid)
             for r in val_rows
             if r.subject_qid in sg_by_qid and r.teacher_target_ids and r.accepted_answers
         ]
@@ -455,14 +474,16 @@ class ConceptTrainer:
         self._eval_system = eval_system
         self._eval_max_new = max_new
         self._eval_gen_batch = gen_batch
-        self._eval_prepared = self.prepare([(sg, q, p) for sg, q, _, p in items])
+        self._eval_prepared = self.prepare([(sg, q, p, aq) for sg, q, _, p, aq in items])
         base_ok = teacher_ok = 0
         for chunk in _chunks(items, gen_batch):
-            base = self._generate_text_batch([(eval_system, q) for _, q, _, _ in chunk], max_new)
-            rag_prompts = [(eval_system, f"{self._facts(sg)}\n\n{q}") for sg, q, _, _ in chunk]
+            base = self._generate_text_batch([(eval_system, q) for _, q, _, _, _ in chunk], max_new)
+            rag_prompts = [
+                (eval_system, f"{self._facts(sg, aq)}\n\n{q}") for sg, q, _, _, aq in chunk
+            ]
             rag = self._generate_text_batch(rag_prompts, max_new)
-            base_ok += sum(answer_ok(p, g) for p, (_, _, g, _) in zip(base, chunk, strict=True))
-            teacher_ok += sum(answer_ok(p, g) for p, (_, _, g, _) in zip(rag, chunk, strict=True))
+            base_ok += sum(answer_ok(p, g) for p, (*_, g, _, _) in zip(base, chunk, strict=True))
+            teacher_ok += sum(answer_ok(p, g) for p, (*_, g, _, _) in zip(rag, chunk, strict=True))
         n = max(1, len(items))
         self._eval_base, self._eval_teacher = base_ok / n, teacher_ok / n
         return len(items)
@@ -484,9 +505,10 @@ class ConceptTrainer:
         self.model.eval()
         concept_ok = 0
         for chunk in _chunks(items, self._eval_gen_batch):
-            gen_items = [(sg, q) for sg, q, _, _ in chunk]
+            gen_items = [(sg, q) for sg, q, _, _, _ in chunk]
             preds = self.generate_student_batch(gen_items, self._eval_max_new, self._eval_system)
-            concept_ok += sum(answer_ok(p, g) for p, (_, _, g, _) in zip(preds, chunk, strict=True))
+            golds = [it[2] for it in chunk]
+            concept_ok += sum(answer_ok(p, g) for p, g in zip(preds, golds, strict=True))
         kl = self._eval_kl()
         self.model.train()
         return {
@@ -500,7 +522,7 @@ class ConceptTrainer:
     @torch.no_grad()
     def evaluate_popqa(
         self,
-        items: list[tuple[Subgraph, str, list[str]]],
+        items: list[tuple[Subgraph, str, list[str], str | None]],
         *,
         eval_system: str = TEACHER_SYSTEM,
         max_new: int = 32,
@@ -508,23 +530,23 @@ class ConceptTrainer:
     ) -> dict[str, float]:
         """External-benchmark accuracy on UNSEEN entities (e.g. PopQA): concept vs base vs RAG.
 
-        ``items`` = ``(subject_subgraph, question, answer_aliases)``, scored under ``eval_system``
-        with the alias matcher (so base/RAG here are this model's own brackets under that prompt,
-        not the official PopQA-template numbers).
+        ``items`` = ``(subject_subgraph, question, answer_aliases, answer_qid)``, scored under
+        ``eval_system`` with the alias matcher (so base/RAG here are this model's own brackets under
+        that prompt, not the official PopQA-template numbers).
         """
         self.model.eval()
         concept_ok = base_ok = teacher_ok = 0
         for chunk in _chunks(items, gen_batch):
             concept = self.generate_student_batch(
-                [(sg, q) for sg, q, _ in chunk], max_new, eval_system
+                [(sg, q) for sg, q, _, _ in chunk], max_new, eval_system
             )
-            base = self._generate_text_batch([(eval_system, q) for _, q, _ in chunk], max_new)
+            base = self._generate_text_batch([(eval_system, q) for _, q, _, _ in chunk], max_new)
             rag = self._generate_text_batch(
-                [(eval_system, f"{self._facts(sg)}\n\n{q}") for sg, q, _ in chunk], max_new
+                [(eval_system, f"{self._facts(sg, aq)}\n\n{q}") for sg, q, _, aq in chunk], max_new
             )
-            concept_ok += sum(answer_ok(p, g) for p, (_, _, g) in zip(concept, chunk, strict=True))
-            base_ok += sum(answer_ok(p, g) for p, (_, _, g) in zip(base, chunk, strict=True))
-            teacher_ok += sum(answer_ok(p, g) for p, (_, _, g) in zip(rag, chunk, strict=True))
+            concept_ok += sum(answer_ok(p, g) for p, (*_, g, _) in zip(concept, chunk, strict=True))
+            base_ok += sum(answer_ok(p, g) for p, (*_, g, _) in zip(base, chunk, strict=True))
+            teacher_ok += sum(answer_ok(p, g) for p, (*_, g, _) in zip(rag, chunk, strict=True))
         self.model.train()
         n = max(1, len(items))
         return {

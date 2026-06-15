@@ -62,3 +62,46 @@ def test_verbalize_budgeted_returns_largest_fitting_prefix():
     assert verbalize_budgeted(sg, words, budget=budget) == verbalize(sg, max_neighbors=2)
 
 
+
+
+def _big_sg(n=30):
+    # rank-sorted edges; the answer is a LOW-rank (tail) neighbor that a top-k budget would cut.
+    edges = [Edge(property_id=f"P{i}", property_label=f"rel{i}",
+                  neighbor=Entity(qid=f"Q{i}", label=f"neighbor_{i}")) for i in range(n)]
+    return Subgraph(center=Entity(qid="QX", label="X"), edges=edges, n_edges_total=n)
+
+
+def test_verbalize_with_answer_guarantees_the_answer_edge():
+    from conceptformer.verbalize import verbalize_budgeted, verbalize_with_answer
+
+    sg = _big_sg(30)
+    count = lambda t: len(t.split())  # noqa: E731 — crude word tokenizer for the test
+    budget = 12  # only fits a handful of edges
+    tail_answer = "Q27"  # a deep-tail neighbor (rank 27 of 30)
+    plain = verbalize_budgeted(sg, count, budget)
+    guaranteed = verbalize_with_answer(sg, tail_answer, count, budget)
+    assert "neighbor_27" not in plain  # top-PageRank budget cuts the tail answer
+    assert "neighbor_27" in guaranteed  # guaranteed version always includes it
+
+
+def test_verbalize_with_answer_rng_shuffles_distractors_deterministically():
+    import random
+
+    from conceptformer.verbalize import verbalize_with_answer
+
+    sg = _big_sg(30)
+    count = lambda t: len(t.split())  # noqa: E731
+    a = verbalize_with_answer(sg, "Q5", count, 20, rng=random.Random(0))
+    b = verbalize_with_answer(sg, "Q5", count, 20, rng=random.Random(0))
+    c = verbalize_with_answer(sg, "Q5", count, 20, rng=random.Random(1))
+    assert "neighbor_5" in a  # answer always present
+    assert a == b  # same seed → same subset
+    assert a != c  # different seed → different distractors (subsampling)
+
+
+def test_verbalize_with_answer_none_falls_back():
+    from conceptformer.verbalize import verbalize_budgeted, verbalize_with_answer
+
+    sg = _big_sg(10)
+    count = lambda t: len(t.split())  # noqa: E731
+    assert verbalize_with_answer(sg, None, count, 8) == verbalize_budgeted(sg, count, 8)
