@@ -15,15 +15,23 @@ batched/padded forward is a later optimization. See ``docs/MODEL_DESIGN.md`` §0
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 from torch import Tensor
 
+from conceptformer.generate.signal import answer_ok
 from conceptformer.generate.teacher import TEACHER_SYSTEM
 from conceptformer.model.backbone import Backbone
 from conceptformer.model.conceptformer import ConceptFormer
-from conceptformer.model.featurizer import featurize_subgraph
+from conceptformer.model.featurizer import (
+    SubgraphFeatures,
+    collate_features,
+    featurize_subgraph,
+)
+from conceptformer.model.injection import build_position_ids, pack_embeddings
 from conceptformer.schemas import Subgraph
 from conceptformer.train.forcing import gather_path_logits
 from conceptformer.train.losses import sequence_cross_entropy, sequence_kl
@@ -31,6 +39,25 @@ from conceptformer.verbalize import verbalize_budgeted
 
 # Unique marker reserving the concept-token slot inside the rendered chat template.
 _SENTINEL = "\x00CF_CONCEPTS\x00"
+
+# Diverse system prompts to distill under so the concept vectors don't couple to any one prompt
+# (prompt augmentation). The vectors must reproduce the teacher under all of these → they encode
+# the entity's facts prompt-agnostically. Hold out a *different* prompt at eval to prove decoupling.
+AUGMENT_SYSTEMS = (
+    "You are a helpful assistant.",
+    "You are a helpful assistant. Answer with just the answer, as briefly as possible.",
+    "You are a knowledgeable expert. Give accurate, concise answers.",
+    "Answer the question using what you know.",
+    "Respond helpfully and factually.",
+)
+
+# A system prompt deliberately NOT in AUGMENT_SYSTEMS: evaluating under it tests whether the
+# concept vectors decoupled from the training prompts (prompt-generalization).
+HELD_OUT_EVAL_SYSTEM = "You are a precise question-answering system. State the answer."
+
+
+def _chunks(seq: list, size: int) -> list[list]:
+    return [seq[i : i + size] for i in range(0, len(seq), size)]
 
 
 @dataclass
@@ -45,6 +72,34 @@ class TrainConfig:
     temperature: float = 1.0
     ce_weight: float = 0.0  # optional hard-CE factuality anchor (ablate; 0 = pure KL)
     rag_context_tokens: int = 2048
+    warmup_steps: int = 0  # >0 with total_steps enables linear warmup + cosine decay
+    total_steps: int = 0
+    # Cache the frozen teacher's path hidden states (~m*d/example) so the step skips the teacher
+    # forward. A big win for small data x many epochs (high reuse); set False for large-data /
+    # few-epoch runs where the teacher is computed ~once anyway and the cache would be huge.
+    cache_teacher: bool = True
+    # System prompts to distill under (prompt augmentation → prompt-agnostic vectors). Empty =
+    # single-prompt (TEACHER_SYSTEM). Set to AUGMENT_SYSTEMS to decouple. Cache scales by the count.
+    augment_systems: tuple[str, ...] = ()
+
+
+@dataclass
+class Prepared:
+    """One example with its deterministic preprocessing done once (see ``ConceptTrainer.prepare``).
+
+    Tokenization (teacher context, student tail) and the entity's edge features never change across
+    epochs, so we compute them once. ``teacher_hidden`` (``(m, d)``, CPU) caches the *frozen*
+    teacher's final hidden states at the path positions — the teacher target is constant, so the
+    training step skips the teacher forward entirely and only runs the student. ``qid`` keys the
+    per-entity edge-feature cache.
+    """
+
+    qid: str
+    teacher_ctx_ids: list[int]
+    student_tail_ids: list[int]
+    path: list[int]
+    teacher_hidden: Tensor | None = None
+    system_idx: int = 0  # which augmentation system prompt this row was built under
 
 
 class ConceptTrainer:
@@ -72,9 +127,39 @@ class ConceptTrainer:
                 {"params": self.model.gate.parameters(), "lr": config.gate_lr},
             ]
         )
+        self.sched = (
+            torch.optim.lr_scheduler.LambdaLR(self.opt, self._lr_factor)
+            if config.total_steps > 0
+            else None
+        )
+        # Deterministic-preprocessing caches (populated by prepare()): per-entity edge features and
+        # the constant student "head" token ids (system + user-role header, before the concepts).
+        self._feat_cache: dict[str, SubgraphFeatures] = {}
+        # System prompts for augmentation (defaults to a single neutral one if not augmenting).
+        self._systems = list(config.augment_systems) or [TEACHER_SYSTEM]
+        self._head_ids_by_system: dict[int, list[int]] = {}
+        # Held-out eval state (populated by setup_eval; brackets are static across training).
+        self._eval_items: list = []
+        self._eval_prepared: list[Prepared] = []
+        self._eval_system = TEACHER_SYSTEM
+        self._eval_base = 0.0
+        self._eval_teacher = 0.0
+        self._eval_max_new = 32
+        self._eval_gen_batch = 48
+
+    def _lr_factor(self, step: int) -> float:
+        """Linear warmup then cosine decay (multiplies each param group's base LR)."""
+        warmup, total = self.cfg.warmup_steps, self.cfg.total_steps
+        if step < warmup:
+            return (step + 1) / max(1, warmup)
+        progress = (step - warmup) / max(1, total - warmup)
+        return 0.5 * (1.0 + math.cos(math.pi * min(1.0, progress)))
 
     def _count_tokens(self, text: str) -> int:
         return len(self.bb.tokenizer.encode(text, add_special_tokens=False))
+
+    def _facts(self, sg: Subgraph) -> str:
+        return verbalize_budgeted(sg, self._count_tokens, self.cfg.rag_context_tokens)
 
     def _render(self, system: str, user: str) -> str:
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -95,56 +180,366 @@ class ConceptTrainer:
         concepts = self.model(edge_features, mask)[0]  # (k, d_llm), fp32, grad
         return concepts.to(self.bb.dtype)
 
-    def _teacher_path_logits(
-        self, sg: Subgraph, question: str, path_ids: list[int]
+    def _pad_targets(self, paths: list[list[int]], m_max: int) -> Tensor:
+        targets = torch.zeros((len(paths), m_max), dtype=torch.long, device=self.bb.device)
+        for i, path in enumerate(paths):
+            targets[i, : len(path)] = torch.tensor(path, device=self.bb.device)
+        return targets
+
+    def _encode_concepts(self, feats: list[SubgraphFeatures]) -> Tensor:
+        """One encoder forward over a collated batch of neighborhoods -> gated ``(B, k, d)``."""
+        edge_features, mask, _ = collate_features(feats)
+        concepts = self.model(edge_features.float().to(self.bb.device), mask.to(self.bb.device))
+        return concepts.to(self.bb.dtype)
+
+    def _embed(self, ids: list[int]) -> Tensor:
+        return self.bb.embed_tokens(torch.tensor(ids, device=self.bb.device))
+
+    def _forward_kl(
+        self,
+        teacher_embeds: list[Tensor],
+        teacher_ctx: list[int],
+        student_embeds: list[Tensor],
+        student_ctx: list[int],
+        path_lens: list[int],
+        paths: list[list[int]],
     ) -> Tensor:
-        """Frozen teacher logits aligned to the path: facts-as-text in context."""
-        facts = verbalize_budgeted(sg, self._count_tokens, self.cfg.rag_context_tokens)
-        context_ids = self._ids(self._render(TEACHER_SYSTEM, f"{facts}\n\n{question}"))
-        seq = torch.tensor(context_ids + path_ids, device=self.bb.device)
-        embeds = self.bb.embed_tokens(seq).unsqueeze(0)
-        attn = torch.ones((1, embeds.shape[1]), dtype=torch.long, device=self.bb.device)
+        """One padded forward each (teacher no-grad, student grad), gather paths, KL.
+
+        We forward to hidden states, gather the ~20 path positions, then apply the LM head only
+        there — identical logits to a full forward but without the huge ``(B, L, V)`` tensor.
+        """
+        t_in, t_attn = pack_embeddings(teacher_embeds)
         with torch.no_grad():
-            logits = self.bb.forward_embeds(embeds, attn)
-        gathered, _ = gather_path_logits(logits, [len(context_ids)], [len(path_ids)])
-        return gathered  # (1, m, V)
-
-    def _student_path_logits(
-        self, sg: Subgraph, question: str, path_ids: list[int]
-    ) -> tuple[Tensor, Tensor]:
-        """Student logits aligned to the path: concept tokens spliced into the facts slot."""
-        head_text, tail_text = self._render(TEACHER_SYSTEM, _SENTINEL + f"\n\n{question}").split(
-            _SENTINEL
-        )
-        head_ids, tail_ids = self._ids(head_text), self._ids(tail_text)
-        concepts = self._concepts(sg)  # (k, d), grad
-        head = self.bb.embed_tokens(torch.tensor(head_ids, device=self.bb.device))
-        tail = self.bb.embed_tokens(torch.tensor(tail_ids + path_ids, device=self.bb.device))
-        embeds = torch.cat([head, concepts, tail], dim=0).unsqueeze(0)  # (1, L, d)
-        attn = torch.ones((1, embeds.shape[1]), dtype=torch.long, device=self.bb.device)
-        logits = self.bb.forward_embeds(embeds, attn)
-        context_len = len(head_ids) + self.cfg.k + len(tail_ids)
-        gathered, mask = gather_path_logits(logits, [context_len], [len(path_ids)])
-        return gathered, mask  # (1, m, V), (1, m)
-
-    def example_loss(self, sg: Subgraph, question: str, path_ids: list[int]) -> Tensor:
-        teacher = self._teacher_path_logits(sg, question, path_ids).float()
-        student, mask = self._student_path_logits(sg, question, path_ids)
-        student = student.float()
-        loss = sequence_kl(student, teacher, mask, temperature=self.cfg.temperature)
+            t_hidden = self.bb.forward_hidden(t_in, t_attn, build_position_ids(t_attn))
+            t_path, mask_m = gather_path_logits(t_hidden, teacher_ctx, path_lens)  # (B, m, d)
+            teacher_g = self.bb.lm_head(t_path)  # (B, m, V)
+        s_in, s_attn = pack_embeddings(student_embeds)
+        s_hidden = self.bb.forward_hidden(s_in, s_attn, build_position_ids(s_attn))
+        s_path, _ = gather_path_logits(s_hidden, student_ctx, path_lens)
+        student_g = self.bb.lm_head(s_path).float()
+        loss = sequence_kl(student_g, teacher_g.float(), mask_m, temperature=self.cfg.temperature)
         if self.cfg.ce_weight > 0:
-            target = torch.tensor([path_ids], device=self.bb.device)
-            loss = loss + self.cfg.ce_weight * sequence_cross_entropy(student, target, mask)
+            targets = self._pad_targets(paths, mask_m.shape[1])
+            loss = loss + self.cfg.ce_weight * sequence_cross_entropy(student_g, targets, mask_m)
         return loss
 
-    def step(self, batch: list[tuple[Subgraph, str, list[int]]]) -> float:
-        """One optimizer step over a list of ``(subgraph, question, teacher_path_ids)``."""
+    def batch_loss(self, batch: list[tuple[Subgraph, str, list[int]]]) -> Tensor:
+        """Batched KL over a minibatch, recomputing preprocessing each step (no cache).
+
+        Used by quick/one-off runs (e.g. ``cf-overfit``). For long runs use ``prepare`` +
+        ``batch_loss_cached``, which hoists the deterministic tokenization/featurization out of the
+        step so it becomes GPU-bound.
+        """
+        batch = [(sg, q, p) for sg, q, p in batch if p]
+        feats = [featurize_subgraph(sg, self.bb.embed_labels) for sg, _, _ in batch]
+        concepts = self._encode_concepts(feats)
+        head_emb = self._embed(self._student_head_ids())
+        teacher_embeds, teacher_ctx, path_lens = [], [], []
+        student_embeds, student_ctx, paths = [], [], []
+        for i, (sg, question, path) in enumerate(batch):
+            facts = verbalize_budgeted(sg, self._count_tokens, self.cfg.rag_context_tokens)
+            ctx_ids = self._ids(self._render(TEACHER_SYSTEM, f"{facts}\n\n{question}"))
+            _, tail_text = self._render(TEACHER_SYSTEM, _SENTINEL + f"\n\n{question}").split(
+                _SENTINEL
+            )
+            tail_ids = self._ids(tail_text)
+            teacher_embeds.append(self._embed(ctx_ids + path))
+            teacher_ctx.append(len(ctx_ids))
+            path_lens.append(len(path))
+            paths.append(path)
+            student_embeds.append(torch.cat([head_emb, concepts[i], self._embed(tail_ids + path)]))
+            student_ctx.append(len(self._student_head_ids()) + self.cfg.k + len(tail_ids))
+        return self._forward_kl(
+            teacher_embeds, teacher_ctx, student_embeds, student_ctx, path_lens, paths
+        )
+
+    def _student_head_ids(self, system_idx: int = 0) -> list[int]:
+        """The student prefix (system + user header, before the concepts), cached per system."""
+        if system_idx not in self._head_ids_by_system:
+            head_text, _ = self._render(self._systems[system_idx], _SENTINEL + "\n\nx").split(
+                _SENTINEL
+            )
+            self._head_ids_by_system[system_idx] = self._ids(head_text)
+        return self._head_ids_by_system[system_idx]
+
+    def prepare(self, items: list[tuple[Subgraph, str, list[int]]]) -> list[Prepared]:
+        """Deterministic preprocessing once, expanded over the augmentation system prompts.
+
+        Each example becomes one ``Prepared`` per system prompt (so training samples a diverse
+        prompt distribution). Entity edge features are cached once; the student tail is
+        system-agnostic; the teacher context (and cached hidden states) are per-system.
+        """
+        prepared: list[Prepared] = []
+        for sg, question, path in items:
+            if not path:
+                continue
+            qid = sg.center.qid
+            if qid not in self._feat_cache:
+                self._feat_cache[qid] = featurize_subgraph(sg, self.bb.embed_labels)
+            facts = verbalize_budgeted(sg, self._count_tokens, self.cfg.rag_context_tokens)
+            _, tail_text = self._render(self._systems[0], _SENTINEL + f"\n\n{question}").split(
+                _SENTINEL
+            )
+            tail_ids = self._ids(tail_text)  # system-agnostic (after the user-content start)
+            for si, system in enumerate(self._systems):
+                ctx_ids = self._ids(self._render(system, f"{facts}\n\n{question}"))
+                prepared.append(Prepared(qid, ctx_ids, tail_ids, path, system_idx=si))
+        if self.cfg.cache_teacher:
+            self._cache_teacher_hidden(prepared)  # one-time frozen-teacher pass (per system)
+        return prepared
+
+    @torch.no_grad()
+    def _cache_teacher_hidden(self, rows: list[Prepared], chunk_size: int = 32) -> None:
+        """Precompute each example's frozen-teacher path-position hidden states (CPU, ~mxd each).
+
+        The teacher target is constant, so we pay one teacher forward here; the step never
+        forwards the teacher again — it applies the LM head to these cached hidden states.
+        ~320 MB for ~8k examples vs ~48 GB if we cached full logits.
+        """
+        for chunk in _chunks(rows, chunk_size):
+            embeds = [self._embed(r.teacher_ctx_ids + r.path) for r in chunk]
+            ctx = [len(r.teacher_ctx_ids) for r in chunk]
+            plens = [len(r.path) for r in chunk]
+            t_in, t_attn = pack_embeddings(embeds)
+            hidden = self.bb.forward_hidden(t_in, t_attn, build_position_ids(t_attn))
+            gathered, _ = gather_path_logits(hidden, ctx, plens)  # (B, m_max, d)
+            for i, row in enumerate(chunk):
+                row.teacher_hidden = gathered[i, : plens[i]].clone().cpu()
+
+    def _padded_teacher(self, batch: list[Prepared]) -> tuple[Tensor, Tensor]:
+        """Teacher logits ``(B, m_max, V)`` + path mask from cached hidden states (no forward)."""
+        path_lens = [len(p.path) for p in batch]
+        m_max = max(path_lens)
+        first = batch[0].teacher_hidden
+        if first is None:
+            raise RuntimeError("teacher_hidden not cached; call prepare() first")
+        hidden = first.new_zeros((len(batch), m_max, first.shape[-1]), device=self.bb.device)
+        mask = torch.zeros((len(batch), m_max), dtype=torch.bool, device=self.bb.device)
+        for i, (p, plen) in enumerate(zip(batch, path_lens, strict=True)):
+            h = p.teacher_hidden
+            if h is None:
+                raise RuntimeError("teacher_hidden not cached; call prepare() first")
+            hidden[i, :plen] = h.to(self.bb.device)
+            mask[i, :plen] = True
+        return self.bb.lm_head(hidden.to(self.bb.dtype)), mask
+
+    def _live_teacher(self, batch: list[Prepared], path_lens: list[int]) -> tuple[Tensor, Tensor]:
+        """Teacher logits via a live forward (fallback when the teacher cache is disabled)."""
+        teacher_embeds = [self._embed(p.teacher_ctx_ids + p.path) for p in batch]
+        teacher_ctx = [len(p.teacher_ctx_ids) for p in batch]
+        t_in, t_attn = pack_embeddings(teacher_embeds)
+        with torch.no_grad():
+            t_hidden = self.bb.forward_hidden(t_in, t_attn, build_position_ids(t_attn))
+            t_path, mask_m = gather_path_logits(t_hidden, teacher_ctx, path_lens)
+            return self.bb.lm_head(t_path), mask_m
+
+    def batch_loss_cached(self, batch: list[Prepared]) -> Tensor:
+        """Batched KL. With the teacher cached, only the student forward runs (~2x faster);
+        otherwise the teacher is forwarded live (the large-data / few-epoch path)."""
+        concepts = self._encode_concepts([self._feat_cache[p.qid] for p in batch])
+        student_embeds, student_ctx, path_lens = [], [], []
+        for i, p in enumerate(batch):
+            head_ids = self._student_head_ids(p.system_idx)  # per-sampled-system prefix
+            head_emb = self._embed(head_ids)
+            student_embeds.append(
+                torch.cat([head_emb, concepts[i], self._embed(p.student_tail_ids + p.path)])
+            )
+            student_ctx.append(len(head_ids) + self.cfg.k + len(p.student_tail_ids))
+            path_lens.append(len(p.path))
+
+        if batch[0].teacher_hidden is not None:
+            teacher_g, mask_m = self._padded_teacher(batch)
+        else:
+            teacher_g, mask_m = self._live_teacher(batch, path_lens)
+        s_in, s_attn = pack_embeddings(student_embeds)
+        s_hidden = self.bb.forward_hidden(s_in, s_attn, build_position_ids(s_attn))
+        s_path, _ = gather_path_logits(s_hidden, student_ctx, path_lens)
+        student_g = self.bb.lm_head(s_path).float()
+        loss = sequence_kl(student_g, teacher_g.float(), mask_m, temperature=self.cfg.temperature)
+        if self.cfg.ce_weight > 0:
+            targets = self._pad_targets([p.path for p in batch], mask_m.shape[1])
+            loss = loss + self.cfg.ce_weight * sequence_cross_entropy(student_g, targets, mask_m)
+        return loss
+
+    def _apply(self, loss: Tensor) -> float:
         self.opt.zero_grad()
-        losses = [self.example_loss(sg, q, p) for sg, q, p in batch if p]
-        loss = torch.stack(losses).mean()
         loss.backward()
         self.opt.step()
+        if self.sched is not None:
+            self.sched.step()
         return float(loss.detach())
+
+    def step(self, batch: list[tuple[Subgraph, str, list[int]]]) -> float:
+        """One optimizer step from raw ``(subgraph, question, path)`` (recomputes preprocessing)."""
+        return self._apply(self.batch_loss(batch))
+
+    def step_prepared(self, batch: list[Prepared]) -> float:
+        """One optimizer step from cached ``Prepared`` rows (GPU-bound)."""
+        return self._apply(self.batch_loss_cached(batch))
+
+    def _left_pad_embeds(self, seqs: list[Tensor]) -> tuple[Tensor, Tensor]:
+        """Left-pad ``(L_i, d)`` embeds for batched generation (real content right-aligned)."""
+        batch, l_max = len(seqs), max(int(s.shape[0]) for s in seqs)
+        out = seqs[0].new_zeros((batch, l_max, int(seqs[0].shape[-1])))
+        attn = torch.zeros((batch, l_max), dtype=torch.long, device=seqs[0].device)
+        for i, s in enumerate(seqs):
+            n = int(s.shape[0])
+            out[i, l_max - n :] = s
+            attn[i, l_max - n :] = 1
+        return out, attn
+
+    @torch.no_grad()
+    def _generate_text_batch(self, prompts: list[tuple[str, str]], max_new: int) -> list[str]:
+        """Batched greedy generation from text prompts (left-padded) — base / RAG-teacher."""
+        if not prompts:
+            return []
+        enc = self.bb.tokenizer(
+            [self._render(s, u) for s, u in prompts], return_tensors="pt", padding=True
+        ).to(self.bb.device)
+        gen = self.bb.model.generate(
+            **enc, max_new_tokens=max_new, do_sample=False,
+            pad_token_id=self.bb.tokenizer.eos_token_id,
+        )
+        new = gen[:, enc["input_ids"].shape[1] :]
+        return [t.strip() for t in self.bb.tokenizer.batch_decode(new, skip_special_tokens=True)]
+
+    @torch.no_grad()
+    def generate_student_batch(
+        self, items: list[tuple[Subgraph, str]], max_new: int, system: str = TEACHER_SYSTEM
+    ) -> list[str]:
+        """Batched greedy generation with concept tokens spliced in (left-padded), under ``system``.
+
+        ``system`` may be a prompt the model never trained under — that is the decoupling test.
+        """
+        if not items:
+            return []
+        self.model.eval()
+        concepts = self._encode_concepts(
+            [featurize_subgraph(sg, self.bb.embed_labels) for sg, _ in items]
+        )
+        head_text, _ = self._render(system, _SENTINEL + "\n\nx").split(_SENTINEL)
+        head_emb = self._embed(self._ids(head_text))
+        seqs = []
+        for i, (_, question) in enumerate(items):
+            _, tail = self._render(system, _SENTINEL + f"\n\n{question}").split(_SENTINEL)
+            seqs.append(torch.cat([head_emb, concepts[i], self._embed(self._ids(tail))], dim=0))
+        in_embeds, attn = self._left_pad_embeds(seqs)
+        gen = self.bb.model.generate(
+            inputs_embeds=in_embeds, attention_mask=attn, max_new_tokens=max_new,
+            do_sample=False, pad_token_id=self.bb.tokenizer.eos_token_id,
+        )
+        return [t.strip() for t in self.bb.tokenizer.batch_decode(gen, skip_special_tokens=True)]
+
+    def setup_eval(
+        self,
+        val_rows: list,
+        sg_by_qid: dict,
+        *,
+        eval_system: str = TEACHER_SYSTEM,
+        max_new: int = 32,
+        gen_batch: int = 48,
+    ) -> int:
+        """Prepare the held-out eval set ONCE and compute the static base/RAG-teacher accuracy.
+
+        Everything is scored under ``eval_system`` — pass a prompt held out of training to test
+        decoupling. Base and teacher are constant across training, so they're generated once here;
+        per-checkpoint ``evaluate`` then only runs the student. Returns the number of scorable rows.
+        """
+        items = [
+            (sg_by_qid[r.subject_qid], r.question, list(r.accepted_answers), r.teacher_target_ids)
+            for r in val_rows
+            if r.subject_qid in sg_by_qid and r.teacher_target_ids and r.accepted_answers
+        ]
+        self._eval_items = items
+        self._eval_system = eval_system
+        self._eval_max_new = max_new
+        self._eval_gen_batch = gen_batch
+        self._eval_prepared = self.prepare([(sg, q, p) for sg, q, _, p in items])
+        base_ok = teacher_ok = 0
+        for chunk in _chunks(items, gen_batch):
+            base = self._generate_text_batch([(eval_system, q) for _, q, _, _ in chunk], max_new)
+            rag_prompts = [(eval_system, f"{self._facts(sg)}\n\n{q}") for sg, q, _, _ in chunk]
+            rag = self._generate_text_batch(rag_prompts, max_new)
+            base_ok += sum(answer_ok(p, g) for p, (_, _, g, _) in zip(base, chunk, strict=True))
+            teacher_ok += sum(answer_ok(p, g) for p, (_, _, g, _) in zip(rag, chunk, strict=True))
+        n = max(1, len(items))
+        self._eval_base, self._eval_teacher = base_ok / n, teacher_ok / n
+        return len(items)
+
+    @torch.no_grad()
+    def _eval_kl(self) -> float:
+        total, n = 0.0, 0
+        for chunk in _chunks(self._eval_prepared, 32):
+            total += float(self.batch_loss_cached(chunk)) * len(chunk)
+            n += len(chunk)
+        return total / max(1, n)
+
+    @torch.no_grad()
+    def evaluate(self) -> dict[str, float]:
+        """Per-checkpoint held-out metrics: batched student accuracy + KL; cached brackets."""
+        items = self._eval_items
+        if not items:
+            return dict.fromkeys(("val_kl", "concept_acc", "base_acc", "teacher_acc", "n_acc"), 0.0)
+        self.model.eval()
+        concept_ok = 0
+        for chunk in _chunks(items, self._eval_gen_batch):
+            gen_items = [(sg, q) for sg, q, _, _ in chunk]
+            preds = self.generate_student_batch(gen_items, self._eval_max_new, self._eval_system)
+            concept_ok += sum(answer_ok(p, g) for p, (_, _, g, _) in zip(preds, chunk, strict=True))
+        kl = self._eval_kl()
+        self.model.train()
+        return {
+            "val_kl": kl,
+            "concept_acc": concept_ok / len(items),
+            "base_acc": self._eval_base,
+            "teacher_acc": self._eval_teacher,
+            "n_acc": len(items),
+        }
+
+    @torch.no_grad()
+    def evaluate_popqa(
+        self,
+        items: list[tuple[Subgraph, str, list[str]]],
+        *,
+        eval_system: str = TEACHER_SYSTEM,
+        max_new: int = 32,
+        gen_batch: int = 48,
+    ) -> dict[str, float]:
+        """External-benchmark accuracy on UNSEEN entities (e.g. PopQA): concept vs base vs RAG.
+
+        ``items`` = ``(subject_subgraph, question, answer_aliases)``, scored under ``eval_system``
+        with the alias matcher (so base/RAG here are this model's own brackets under that prompt,
+        not the official PopQA-template numbers).
+        """
+        self.model.eval()
+        concept_ok = base_ok = teacher_ok = 0
+        for chunk in _chunks(items, gen_batch):
+            concept = self.generate_student_batch(
+                [(sg, q) for sg, q, _ in chunk], max_new, eval_system
+            )
+            base = self._generate_text_batch([(eval_system, q) for _, q, _ in chunk], max_new)
+            rag = self._generate_text_batch(
+                [(eval_system, f"{self._facts(sg)}\n\n{q}") for sg, q, _ in chunk], max_new
+            )
+            concept_ok += sum(answer_ok(p, g) for p, (_, _, g) in zip(concept, chunk, strict=True))
+            base_ok += sum(answer_ok(p, g) for p, (_, _, g) in zip(base, chunk, strict=True))
+            teacher_ok += sum(answer_ok(p, g) for p, (_, _, g) in zip(rag, chunk, strict=True))
+        self.model.train()
+        n = max(1, len(items))
+        return {
+            "concept_acc": concept_ok / n,
+            "base_acc": base_ok / n,
+            "teacher_acc": teacher_ok / n,
+            "n": len(items),
+        }
+
+    def save_checkpoint(self, path: Path) -> None:
+        """Persist the trainable ConceptFormer (encoder + gate) + config to reload/eval later."""
+        from dataclasses import asdict
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({"model": self.model.state_dict(), "config": asdict(self.cfg)}, path)
 
     def gate_values(self) -> list[float]:
         return self.model.gate.gate_values().cpu().tolist()

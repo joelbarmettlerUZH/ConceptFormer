@@ -75,3 +75,22 @@ class Backbone:
             position_ids=position_ids,
         )
         return out.logits
+
+    def forward_hidden(
+        self, inputs_embeds: Tensor, attention_mask: Tensor, position_ids: Tensor | None = None
+    ) -> Tensor:
+        """Final hidden states ``(B, T, d)`` — the base transformer *without* the LM head.
+
+        Avoids materializing the ``(B, T, V)`` logits (V≈152k): the caller gathers the few path
+        positions first, then applies ``lm_head`` only there. Identical results, far less memory.
+        """
+        out = self.model.model(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+        )
+        return out.last_hidden_state
+
+    def lm_head(self, hidden: Tensor) -> Tensor:
+        """Project hidden states to vocab logits (position-wise; apply after gathering paths)."""
+        return self.model.lm_head(hidden)

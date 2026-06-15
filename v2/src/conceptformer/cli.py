@@ -605,5 +605,134 @@ def cf_overfit(
     rprint(f"[green]done[/] — KL {first:.4f} → {loss:.4f}")
 
 
+@app.command("cf-train")
+def cf_train(
+    dataset: Annotated[str, typer.Option(help="distilled CF-Train dataset")] = "cftrain_qa_smoke",
+    snapshot: Annotated[str, typer.Option(help="matching snapshot")] = "cftrain_smoke",
+    model: Annotated[str, typer.Option(help="frozen backbone")] = "Qwen/Qwen3-0.6B",
+    k: Annotated[int, typer.Option(help="concept tokens")] = 8,
+    steps: Annotated[int, typer.Option()] = 600,
+    batch: Annotated[int, typer.Option(help="minibatch size")] = 8,
+    val_frac: Annotated[float, typer.Option(help="held-out question fraction")] = 0.3,
+    eval_every: Annotated[int, typer.Option()] = 100,
+    eval_n: Annotated[int, typer.Option(help="held-out examples scored per eval (capped)")] = 120,
+    popqa_eval: Annotated[int, typer.Option(help="after training, score N unseen PopQA")] = 0,
+    popqa_snapshot: Annotated[str, typer.Option(help="snapshot with PopQA neighborhoods")] = "popqa_full",  # noqa: E501
+    checkpoint: Annotated[str, typer.Option(help="save trained encoder under this name")] = "",
+    augment: Annotated[bool, typer.Option(help="distill under many system prompts")] = False,
+    seed: Annotated[int, typer.Option()] = 0,
+    device: Annotated[str, typer.Option()] = "cuda",
+) -> None:
+    """Generalization test: train on a question split, eval on HELD-OUT questions per entity."""
+    import random
+
+    from conceptformer.data.snapshot import iter_subgraphs
+    from conceptformer.generate.dataset import load_cftrain_qa
+    from conceptformer.model.backbone import Backbone
+    from conceptformer.model.chat import ChatModel
+    from conceptformer.train.harness import split_by_held_out_questions
+    from conceptformer.train.trainer import (
+        AUGMENT_SYSTEMS,
+        HELD_OUT_EVAL_SYSTEM,
+        TEACHER_SYSTEM,
+        ConceptTrainer,
+        TrainConfig,
+    )
+
+    qa_dir = settings.data_root / "cf_train" / dataset
+    rows = load_cftrain_qa(qa_dir / "qa_distill.jsonl")
+    sg_by_qid = {sg.center.qid: sg for sg in iter_subgraphs(settings.snapshots_dir / snapshot)}
+    train_rows, val_rows = split_by_held_out_questions(rows, val_frac=val_frac, seed=seed)
+    train_tuples = [
+        (sg_by_qid[r.subject_qid], r.question, r.teacher_target_ids)
+        for r in train_rows
+        if r.subject_qid in sg_by_qid and r.teacher_target_ids
+    ]
+    val_rows = [r for r in val_rows if r.subject_qid in sg_by_qid]
+    rng = random.Random(seed)
+    # Fixed eval subset so the curve is comparable across reports (full val would be too slow).
+    eval_val = rng.sample(val_rows, min(eval_n, len(val_rows)))
+    rprint(
+        f"train {len(train_tuples)} examples / val {len(val_rows)} held-out questions "
+        f"(eval on {len(eval_val)}; k={k}, {steps} steps, batch {batch})"
+    )
+
+    backbone = Backbone(ChatModel(model, device=device))
+    # Cap the teacher facts budget for training: tail entities have small neighborhoods so this
+    # rarely truncates, and it bounds the padded (B, L, V) logits tensor's memory.
+    cfg = TrainConfig(
+        k=k,
+        warmup_steps=max(10, steps // 20),
+        total_steps=steps,
+        rag_context_tokens=1024,
+        augment_systems=AUGMENT_SYSTEMS if augment else (),
+    )
+    trainer = ConceptTrainer(backbone, cfg)
+    # When augmenting, evaluate under a HELD-OUT prompt (decoupling test); else the training prompt.
+    eval_system = HELD_OUT_EVAL_SYSTEM if augment else TEACHER_SYSTEM
+    if augment:
+        rprint(f"[cyan]prompt augmentation ON[/] ({len(AUGMENT_SYSTEMS)} systems); "
+               f"eval under HELD-OUT prompt: {eval_system!r}")
+
+    def report(tag: str) -> None:
+        m = trainer.evaluate()
+        rprint(
+            f"  [{tag}] val_KL={m['val_kl']:.3f}  "
+            f"[bold]concept_acc={m['concept_acc']:.1%}[/]  "
+            f"base={m['base_acc']:.1%}  teacher(RAG)={m['teacher_acc']:.1%}  (n={m['n_acc']})"
+        )
+
+    rprint("[dim]preprocessing (featurize + tokenize once) + static eval brackets…[/dim]")
+    prepared = trainer.prepare(train_tuples)  # hoists CPU work out of the training loop
+    trainer.setup_eval(eval_val, sg_by_qid, eval_system=eval_system)  # brackets computed once
+    report("init")
+    for s in range(1, steps + 1):
+        trainer.step_prepared(rng.sample(prepared, min(batch, len(prepared))))
+        if s % eval_every == 0 or s == steps:
+            report(f"step {s}")
+
+    # Held-IN accuracy (a sample of TRAINED questions) disambiguates overfitting from underfitting.
+    from conceptformer.train.harness import is_answerable
+
+    held_in = [r for r in train_rows if is_answerable(r) and r.subject_qid in sg_by_qid]
+    train_sample = rng.sample(held_in, min(len(eval_val), len(held_in)))
+    trainer.setup_eval(train_sample, sg_by_qid, eval_system=eval_system)  # held-in sample
+    tm = trainer.evaluate()
+    rprint(
+        f"  [held-IN sample] concept_acc={tm['concept_acc']:.1%}  KL={tm['val_kl']:.3f}  "
+        f"(n={tm['n_acc']}) — high held-in + low held-out = overfit; both low = undertrained"
+    )
+
+    if checkpoint:
+        ckpt_path = settings.data_root / "checkpoints" / f"{checkpoint}.pt"
+        trainer.save_checkpoint(ckpt_path)
+        rprint(f"[green]saved checkpoint[/] → {ckpt_path}")
+
+    if popqa_eval:
+        from conceptformer.data.benchmarks import load_popqa
+
+        popqa_sgs = {
+            sg.center.qid: sg
+            for sg in iter_subgraphs(settings.snapshots_dir / popqa_snapshot)
+        }
+        examples = [e for e in load_popqa() if e.subject_qid in popqa_sgs and e.answer_labels]
+        rng.shuffle(examples)
+        items = []
+        for e in examples[: popqa_eval * 2]:  # over-sample; some neighborhoods may be empty
+            sg = popqa_sgs[e.subject_qid]
+            if sg.edges:
+                items.append((sg, e.question, e.answer_labels))
+            if len(items) >= popqa_eval:
+                break
+        rprint(f"[bold]PopQA (UNSEEN entities, n={len(items)})[/] — external generalization:")
+        pm = trainer.evaluate_popqa(items, eval_system=eval_system)
+        rprint(
+            f"  [bold]concept_acc={pm['concept_acc']:.1%}[/]  "
+            f"base={pm['base_acc']:.1%}  teacher(RAG)={pm['teacher_acc']:.1%}"
+        )
+
+    rprint("[green]done[/] — concept_acc on HELD-OUT questions is the generalization signal.")
+
+
 if __name__ == "__main__":
     app()
