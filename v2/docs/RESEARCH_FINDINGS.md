@@ -280,16 +280,25 @@ vs the same on `sub_off_72k`; compare the 7-prompt mean rows.
 
 ---
 
-## Finding 8 — Training is init-sensitive: a ~±8-pt run-to-run noise floor (THE big caveat)
+## Finding 8 — Large run-to-run variance (~8 pts) — cause is HYPOTHESIS, not yet proven
 
-> ✅ **EVIDENCE-BACKED** (4 "prefix" runs, same `--seed 0` data order, unseeded torch init) — and it
-> is the most important methodological fact in this doc. It downgrades F1, F2, F7.
+> 🟡 **PARTIAL — observation solid, attribution unconfirmed.** The *existence* of ~8-pt run-to-run
+> variance is observed; that it is *caused by weight init* (vs CUDA nondeterminism or the old-vs-new
+> code difference) is a **hypothesis under test**, not a diagnosis. It still downgrades F1/F2/F7
+> because *whatever* the cause, single-run effects ≲8 pts aren't trustworthy.
 
-**Claim.** With identical config + identical data order, runs converge to **different-quality optima
-purely from weight-init differences**: held-out accuracy spans **0.40–0.485 (~8.5 pts)** and held-out
-KL spans **0.647–0.727**. Training is *stable within a run* (smooth monotone eval-KL, last-5 evals
-span ~0.03; per-step train loss is just minibatch noise, no divergence) — the variance is *between*
-runs, in which basin the init lands in.
+**Observed (fact).** Four "prefix" runs with the same `--seed 0` (so data order identical) span
+held-out **0.40–0.485 (~8.5 pts)** and KL **0.647–0.727**. Within each run training is stable (smooth
+monotone eval-KL, last-5 evals span ~0.03; per-step loss is just minibatch noise, no divergence) — so
+the variance is *between* runs, not late-training oscillation.
+
+**NOT yet established (hypotheses to test).** (a) That the driver is **weight init** — those 4 runs
+were *not* a clean comparison: they also mixed pre-/post-placement code, and torch was unseeded so
+CUDA nondeterminism was uncontrolled too. (b) That the **mechanism** is stochastic symmetry-breaking
+(permutation-symmetric latents + sign-symmetric gates + rugged frozen-LLM alignment) — this is a
+*story consistent with* the differing per-token gate configs, not a proven cause; the gate is likely
+not a fast amplifier (it opens gradually, saturates ~36k). (c) That larger batch / clipping reduces
+it. The variance study (below / `scripts/variance_study.sh`) is designed to test (a) and (c).
 
 **Source.** Four prefix runs, all `--seed 0` (so train/val split + batch order identical; only torch
 init differed because it was unseeded until commit `9a1a604`):
