@@ -20,11 +20,13 @@ cd /home/joelbarmettler/projects/ConceptFormer/v2
 GPU0_LOG=/tmp/cf_aug_placement_gpu0.log
 GPU1_LOG=/tmp/claude-1002/-home-joelbarmettler-projects-ConceptFormer/cf237e9c-4173-4592-9934-9f53223182e4/tasks/bndwbji7x.output
 
-echo "waiting for placement runs to free the GPUs..."
-while ! grep -qa "AUG_PLACEMENT_GPU0_DONE" "$GPU0_LOG" 2>/dev/null; do sleep 120; done
-while ! grep -qa "AUG_PLACEMENT_GPU1_DONE" "$GPU1_LOG" 2>/dev/null; do sleep 60; done
-echo "GPUs free; launching variance study"
-sleep 20
+if [ "${SKIP_WAIT:-0}" != "1" ]; then
+  echo "waiting for placement runs to free the GPUs..."
+  while ! grep -qa "AUG_PLACEMENT_GPU0_DONE" "$GPU0_LOG" 2>/dev/null; do sleep 120; done
+  while ! grep -qa "AUG_PLACEMENT_GPU1_DONE" "$GPU1_LOG" 2>/dev/null; do sleep 60; done
+  echo "GPUs free; launching variance study"
+  sleep 20
+fi
 
 train () {  # $1=gpu $2=batch $3=seed $4=checkpoint-tag
   echo "=== VAR $4 START (gpu$1 batch$2 seed$3) ==="
