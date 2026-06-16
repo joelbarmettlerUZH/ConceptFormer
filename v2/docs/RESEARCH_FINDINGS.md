@@ -103,7 +103,8 @@ task accuracy).
 
 ## Finding 3 — Neighbor-subsampling gives no benefit at budget 2048, and costs ~2× speed
 
-> 🟡 **PARTIAL / IN PROGRESS** — accuracy-parity at equal steps and the ~2× speed delta are backed by `kuyslwjf`/`yvuv4wkx`, but `sub_on` (`yvuv4wkx`) had not reached 72k when written. The final equal-step comparison is pending; treat the *speed* claim as solid and the *full* no-benefit claim as not-yet-complete until the robustness comparison (F5) and final steps land.
+> ✅ **EVIDENCE-BACKED** — both runs completed 72k (`kuyslwjf` off, `yvuv4wkx` on). Subsampling shows
+> no benefit on accuracy, KL, OR prompt robustness (F5), and costs ~2× wall-clock. See final table.
 
 **Claim.** Training with re-sampled teacher facts (`--subsample`) vs teacher-cached (subsample off)
 produces **identical accuracy/KL trajectories at equal steps**, while running **~2× slower**. At
@@ -125,8 +126,18 @@ Both: k=8, d1024/L4, batch 16, 72k steps, same corpus. Compare `held_out/concept
 Within eval noise (n=200) the curves coincide. **Speed:** in equal wall-clock the cached run reached
 step 72k while subsample reached ~36k → ~2× (matches the trainer's "~2× faster" teacher-cache note).
 
-> **Status:** `sub_on_72k` (`yvuv4wkx`) was still training when this was written (latest
-> `held_out/concept_acc` ≈ 0.355, not final). Final equal-step comparison to be appended.
+**Final 72k comparison** (both runs complete; all within n=200 eval noise):
+
+| metric | sub_off `kuyslwjf` (cached) | sub_on `yvuv4wkx` (subsample) |
+|---|--:|--:|
+| held_out/concept_acc | 0.40 | 0.395 |
+| held_in/concept_acc | 0.515 | 0.525 |
+| popqa/concept_acc | 0.18 | 0.19 |
+| held_out/val_kl | 0.695 | 0.706 |
+| prompt-robustness held_out std (F5) | **1.2%** | **2.6%** (worse) |
+
+**Verdict:** no benefit on any axis (accuracy, KL, prompt robustness), ~2× slower → use cached
+(subsample off) going forward.
 
 **Re-verify:** overlay `held_out/concept_acc` for both runs in W&B; confirm overlap at shared steps.
 Speed: compare each run's `_runtime` at the same `_step`.
@@ -167,7 +178,9 @@ trained after the metrics-logging change — see Methods note M2).
 
 ## Finding 5 — Concept vectors are prompt-robust *without* augmentation
 
-> 🟡 **PARTIAL / IN PROGRESS** — backed for the `sub_off_72k` checkpoint only (one model). The on-vs-off robustness comparison and the `--augment` lever ablation are NOT yet run; do not generalise to 'subsample/augmentation don't help robustness' yet.
+> ✅ **EVIDENCE-BACKED for both A/B models** (`sub_off_72k`, `sub_on_72k`) — both prompt-robust
+> without augmentation. 🟡 The **`--augment` lever** ablation (does explicit prompt augmentation beat
+> the already-low baseline std?) is NOT yet run — do not claim anything about augmentation's effect.
 
 **Claim.** A model trained under a single system prompt (`TEACHER_SYSTEM`) shows near-flat accuracy
 across 7 system prompts, including a never-seen one: held-out std **1.2%**, PopQA std **0.6%**.
@@ -181,17 +194,20 @@ conceptformer eval-prompt-robustness --checkpoint sub_off_72k \
 Uses checkpoint **`model:sub_off_72k`** (W&B artifact on run `kuyslwjf`); the command auto-pulls it
 from W&B if `data/checkpoints/sub_off_72k.pt` is absent, so this is reproducible on any machine.
 
-| prompt | held_out | popqa |
-|---|--:|--:|
-| teacher (training prompt) | 40.0% | 17.0% |
-| held-out prompt (never seen) | 37.0% | 16.5% |
-| aug1–aug5 (never seen) | 37.5–40.0% | 16.5–18.0% |
-| **spread** | mean 39.1%, **std 1.2%**, min 37.0% | mean 17.1%, **std 0.6%**, min 16.5% |
+Spread across 7 system prompts (teacher + held-out prompt + aug1–5), per checkpoint:
 
-> **Status:** the matching `sub_on_72k` (`yvuv4wkx`) robustness profile is queued (auto-runs when its
-> checkpoint lands) for the definitive subsample on-vs-off robustness comparison. The
-> augmentation-lever ablation (`--augment` on vs off) is the planned follow-up to confirm whether
-> augmentation moves an already-~1%-std baseline.
+| checkpoint | held_out mean / **std** / min | popqa mean / std / min |
+|---|--:|--:|
+| `sub_off_72k` (`model:sub_off_72k`) | 39.1% / **1.2%** / 37.0% | 17.1% / 0.6% / 16.5% |
+| `sub_on_72k` (`model:sub_on_72k`) | 37.9% / **2.6%** / 32.0% | 17.5% / 0.7% / 17.0% |
+
+Both are prompt-robust (every non-teacher prompt is *unseen* by these single-prompt-trained models,
+yet held-out moves only a few points). Subsampling does **not** improve robustness — it is slightly
+**worse** (2× the held-out std, lower worst-case), reinforcing F3. Reproduce for `sub_on` by swapping
+`--checkpoint sub_on_72k` into the command above (auto-pulls `model:sub_on_72k`).
+
+> 🟡 Still open: whether `--augment` (multi-prompt distillation) lowers the std *below* this already
+> ~1–3% baseline. Not yet run; see open question 3.
 
 ---
 
@@ -234,7 +250,10 @@ full-verbalize tokens p50=96, p90=209, p99=476, max=2193; **1/10000** subgraphs 
 ## Open questions (not yet evidence-backed — do NOT state as findings)
 
 1. Do the capacity/k orderings hold at convergence (cached, ~60k+ steps)? (sweeps were 24k, undertrained)
-2. Does `sub_on` match `sub_off` on robustness, fully closing the subsample question?
-3. Does `--augment` improve prompt robustness beyond the already-~1% std baseline?
-4. Does 10×-wider data (100k entities) lift the ~40% held-out / 18% PopQA ceiling? (snapshot staged;
-   generation NOT started — gated on Q2/Q3)
+2. ~~Does `sub_on` match `sub_off` on robustness?~~ **RESOLVED → F3/F5**: yes (slightly worse);
+   subsample question fully closed.
+3. Does `--augment` improve prompt robustness beyond the already ~1–3% std baseline?
+4. Does 10×-wider data (100k entities) lift the ~40% held-out / 18% PopQA ceiling? ⛔ NOT YET
+   EVIDENCE-BACKED. Snapshot **built and staged** — `data/snapshots/cftrain_100k`, 100,000 usable
+   subgraphs (261,475 candidates, 38% pass), sha256 `ee4850f5633d8aa2a374bb9e145ce10675870274e7b25ca5bf0c5f545e60242c`.
+   Gemma QA generation + teacher extraction **NOT started** — deliberately gated on Q2/Q3 (robustness).
