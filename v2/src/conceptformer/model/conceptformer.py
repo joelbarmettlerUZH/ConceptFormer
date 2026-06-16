@@ -28,14 +28,27 @@ class ConceptFormer(nn.Module):
         n_layers: int = 2,
         n_heads: int = 8,
         dropout: float = 0.0,
+        gate_mode: str = "tanh",
     ) -> None:
         super().__init__()
         self.k = k
+        self.gate_mode = gate_mode
         self.encoder = ConceptEncoder(
             d_in, d_llm, k, d_model=d_model, n_layers=n_layers, n_heads=n_heads, dropout=dropout
         )
-        self.gate = ConceptGate(k)
+        if gate_mode == "tanh":
+            self.gate: ConceptGate | None = ConceptGate(k)
+        elif gate_mode == "none":
+            # No multiplicative gate: zero-init the encoder's output projection instead, so concepts
+            # still start at 0 (capability preserved) but without the saturating/sign-symmetric
+            # multiplicative gate.
+            self.gate = None
+            nn.init.zeros_(self.encoder.out_proj.weight)
+            nn.init.zeros_(self.encoder.out_proj.bias)
+        else:
+            raise ValueError(f"unknown gate_mode {gate_mode!r}")
 
     def forward(self, edge_features: Tensor, edge_mask: Tensor) -> Tensor:
-        """Encode the neighborhood, then apply the zero-init gate (concepts == 0 at step 0)."""
-        return self.gate(self.encoder(edge_features, edge_mask))
+        """Encode the neighborhood, then (for ``tanh``) apply the zero-init gate."""
+        concepts = self.encoder(edge_features, edge_mask)
+        return self.gate(concepts) if self.gate is not None else concepts

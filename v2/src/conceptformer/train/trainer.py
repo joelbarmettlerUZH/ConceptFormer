@@ -15,8 +15,10 @@ batched/padded forward is a later optimization. See ``docs/MODEL_DESIGN.md`` §0
 
 from __future__ import annotations
 
+import contextlib
 import math
 import random
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -115,6 +117,14 @@ class TrainConfig:
     seed: int = 0
     # Max grad-norm (0 = off); guards against a rare bad step committing the run to a poor basin.
     grad_clip: float = 0.0
+    # Exponential moving average of the trainable weights (0 = off). Eval + the saved checkpoint use
+    # the EMA weights, so the final result depends far less on exactly where the last step landed --
+    # a direct lever for OUTCOME stability across near-identical runs.
+    ema_decay: float = 0.0
+    # Concept gate: "tanh" (zero-init, saturating, sign-symmetric -- the suspected init amplifier)
+    # or "none" (no gate; the encoder output projection is zero-init instead, so concepts still
+    # start at 0 but without the saturating multiplicative coupling).
+    gate_mode: str = "tanh"
     # Where the k concept tokens are spliced into the student's user message, relative to the
     # entity mention: "prefix" (message start, the default/baseline), "before_entity",
     # "after_entity", or "replace_entity" (the entity surface form is removed and the concepts
@@ -183,16 +193,15 @@ class ConceptTrainer:
             n_layers=config.n_layers,
             n_heads=config.n_heads,
             dropout=config.dropout,
+            gate_mode=config.gate_mode,
         ).to(backbone.device)
         self.model.train()
         # The gate gets its own (higher) LR: with a shared 1e-4 it stays near 0, which zeroes the
         # gradient to the encoder (grad ∝ tanh(gate)) — a dead zone where nothing learns.
-        self.opt = torch.optim.AdamW(
-            [
-                {"params": self.model.encoder.parameters(), "lr": config.lr},
-                {"params": self.model.gate.parameters(), "lr": config.gate_lr},
-            ]
-        )
+        groups: list[dict] = [{"params": self.model.encoder.parameters(), "lr": config.lr}]
+        if self.model.gate is not None:
+            groups.append({"params": self.model.gate.parameters(), "lr": config.gate_lr})
+        self.opt = torch.optim.AdamW(groups)
         self.sched = (
             torch.optim.lr_scheduler.LambdaLR(self.opt, self._lr_factor)
             if config.total_steps > 0
@@ -204,6 +213,14 @@ class ConceptTrainer:
         # System prompts for augmentation (defaults to a single neutral one if not augmenting).
         self._systems = list(config.augment_systems) or [TEACHER_SYSTEM]
         self._sub_rng = random.Random(config.seed)  # re-samples distractors when subsampling
+        # EMA of trainable weights (None = off). Eval + checkpoint use these (see _eval_weights).
+        self._ema: dict[str, Tensor] | None = None
+        if config.ema_decay > 0:
+            self._ema = {
+                n: p.detach().clone()
+                for n, p in self.model.named_parameters()
+                if p.requires_grad
+            }
         # Default eval set (held-out), populated by setup_eval; brackets static across training.
         self._eval: EvalSet | None = None
         # Cache of frozen base/teacher PopQA brackets per item-set (so a per-checkpoint PopQA
@@ -439,7 +456,32 @@ class ConceptTrainer:
         self.opt.step()
         if self.sched is not None:
             self.sched.step()
+        if self._ema is not None:
+            d = self.cfg.ema_decay
+            with torch.no_grad():
+                for n, p in self.model.named_parameters():
+                    if n in self._ema:
+                        self._ema[n].mul_(d).add_(p.detach(), alpha=1.0 - d)
         return float(loss.detach())
+
+    @contextlib.contextmanager
+    def _eval_weights(self) -> Iterator[None]:
+        """Swap EMA weights into the model for eval/checkpoint, then restore (no-op if EMA off)."""
+        if self._ema is None:
+            yield
+            return
+        backup = {n: p.detach().clone() for n, p in self.model.named_parameters() if n in self._ema}
+        with torch.no_grad():
+            for n, p in self.model.named_parameters():
+                if n in self._ema:
+                    p.copy_(self._ema[n])
+        try:
+            yield
+        finally:
+            with torch.no_grad():
+                for n, p in self.model.named_parameters():
+                    if n in backup:
+                        p.copy_(backup[n])
 
     def step(self, batch: list[tuple[Subgraph, str, list[int], str | None]]) -> float:
         """One optimizer step from raw ``(subgraph, question, path, answer_qid)`` (live teacher)."""
@@ -575,12 +617,13 @@ class ConceptTrainer:
             return dict.fromkeys(("val_kl", "concept_acc", "base_acc", "teacher_acc", "n_acc"), 0.0)
         self.model.eval()
         concept_ok = 0
-        for chunk in _chunks(es.items, es.gen_batch):
-            gen_items = [(sg, q) for sg, q, _, _, _ in chunk]
-            preds = self.generate_student_batch(gen_items, es.max_new, es.system)
-            golds = [it[2] for it in chunk]
-            concept_ok += sum(answer_ok(p, g) for p, g in zip(preds, golds, strict=True))
-        kl = self._eval_kl(es.prepared)
+        with self._eval_weights():  # eval under EMA weights when enabled
+            for chunk in _chunks(es.items, es.gen_batch):
+                gen_items = [(sg, q) for sg, q, _, _, _ in chunk]
+                preds = self.generate_student_batch(gen_items, es.max_new, es.system)
+                golds = [it[2] for it in chunk]
+                concept_ok += sum(answer_ok(p, g) for p, g in zip(preds, golds, strict=True))
+            kl = self._eval_kl(es.prepared)
         self.model.train()
         return {
             "val_kl": kl,
@@ -611,21 +654,28 @@ class ConceptTrainer:
         self.model.eval()
         cached = self._popqa_brackets.get(id(items)) if cache_brackets else None
         concept_ok = base_ok = teacher_ok = 0
-        for chunk in _chunks(items, gen_batch):
-            concept = self.generate_student_batch(
-                [(sg, q) for sg, q, _, _ in chunk], max_new, eval_system
-            )
-            concept_ok += sum(answer_ok(p, g) for p, (*_, g, _) in zip(concept, chunk, strict=True))
-            if cached is None:
-                base = self._generate_text_batch(
-                    [(eval_system, q) for _, q, _, _ in chunk], max_new
+        with self._eval_weights():  # student generation under EMA weights when enabled
+            for chunk in _chunks(items, gen_batch):
+                concept = self.generate_student_batch(
+                    [(sg, q) for sg, q, _, _ in chunk], max_new, eval_system
                 )
-                rag = self._generate_text_batch(
-                    [(eval_system, f"{self._facts(sg, aq)}\n\n{q}") for sg, q, _, aq in chunk],
-                    max_new,
+                concept_ok += sum(
+                    answer_ok(p, g) for p, (*_, g, _) in zip(concept, chunk, strict=True)
                 )
-                base_ok += sum(answer_ok(p, g) for p, (*_, g, _) in zip(base, chunk, strict=True))
-                teacher_ok += sum(answer_ok(p, g) for p, (*_, g, _) in zip(rag, chunk, strict=True))
+                if cached is None:
+                    base = self._generate_text_batch(
+                        [(eval_system, q) for _, q, _, _ in chunk], max_new
+                    )
+                    rag = self._generate_text_batch(
+                        [(eval_system, f"{self._facts(sg, aq)}\n\n{q}") for sg, q, _, aq in chunk],
+                        max_new,
+                    )
+                    base_ok += sum(
+                        answer_ok(p, g) for p, (*_, g, _) in zip(base, chunk, strict=True)
+                    )
+                    teacher_ok += sum(
+                        answer_ok(p, g) for p, (*_, g, _) in zip(rag, chunk, strict=True)
+                    )
         self.model.train()
         n = max(1, len(items))
         base_acc, teacher_acc = cached if cached is not None else (base_ok / n, teacher_ok / n)
@@ -639,18 +689,20 @@ class ConceptTrainer:
         }
 
     def save_checkpoint(self, path: Path) -> None:
-        """Persist the trainable ConceptFormer (encoder + gate) + config to reload/eval later."""
+        """Persist the trainable ConceptFormer + config (the EMA weights when EMA is on)."""
         from dataclasses import asdict
 
         path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save({"model": self.model.state_dict(), "config": asdict(self.cfg)}, path)
+        with self._eval_weights():
+            state = {n: p.detach().cpu().clone() for n, p in self.model.state_dict().items()}
+        torch.save({"model": state, "config": asdict(self.cfg)}, path)
 
     def gate_values(self) -> list[float]:
-        return self.model.gate.gate_values().cpu().tolist()
+        return self.model.gate.gate_values().cpu().tolist() if self.model.gate is not None else []
 
     def raw_gate(self) -> list[float]:
         """Pre-tanh gate parameters (to see whether the gate is actually opening)."""
-        return self.model.gate.gate.detach().cpu().tolist()
+        return self.model.gate.gate.detach().cpu().tolist() if self.model.gate is not None else []
 
     @torch.no_grad()
     def concept_norm(self, sg: Subgraph) -> float:

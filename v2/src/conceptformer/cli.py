@@ -639,6 +639,8 @@ def cf_train(
         typer.Option(help="concept slot: prefix|before_entity|after_entity|replace_entity"),
     ] = "prefix",
     grad_clip: Annotated[float, typer.Option(help="max grad-norm (0=off)")] = 0.0,
+    ema_decay: Annotated[float, typer.Option(help="EMA decay for eval/ckpt weights (0=off)")] = 0.0,
+    gate_mode: Annotated[str, typer.Option(help="concept gate: tanh|none")] = "tanh",
     metrics_out: Annotated[str, typer.Option(help="write final metrics JSON to this path")] = "",
     wandb: Annotated[bool, typer.Option(help="log to Weights & Biases")] = False,
     wandb_project: Annotated[str, typer.Option()] = "conceptformer-v2",
@@ -696,6 +698,8 @@ def cf_train(
         subsample_neighbors=subsample,
         placement=placement,
         grad_clip=grad_clip,
+        ema_decay=ema_decay,
+        gate_mode=gate_mode,
         seed=seed,
     )
     trainer = ConceptTrainer(backbone, cfg)
@@ -712,7 +716,8 @@ def cf_train(
                 "k": k, "d_model": d_model, "n_layers": n_layers, "lr": lr,
                 "temperature": temperature, "steps": steps, "batch": batch,
                 "augment": augment, "subsample": subsample, "placement": placement,
-                "grad_clip": grad_clip, "seed": seed,
+                "grad_clip": grad_clip, "ema_decay": ema_decay, "gate_mode": gate_mode,
+                "seed": seed,
                 "dataset": dataset, "snapshot": snapshot,
                 "trainable_params": sum(p.numel() for p in trainer.model.parameters()),
             },
@@ -787,9 +792,10 @@ def cf_train(
         rprint(line)
         if wb:
             gates = trainer.gate_values()
-            log["gate/max"] = max(gates)
-            log["gate/min"] = min(gates)
-            log["gate/mean"] = sum(gates) / len(gates)
+            if gates:  # empty when gate_mode="none"
+                log["gate/max"] = max(gates)
+                log["gate/min"] = min(gates)
+                log["gate/mean"] = sum(gates) / len(gates)
             log["train/lr"] = trainer.opt.param_groups[0]["lr"]
             wb.log(log, step=step)
         return m
