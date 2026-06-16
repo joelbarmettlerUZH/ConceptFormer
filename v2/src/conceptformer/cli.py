@@ -634,6 +634,10 @@ def cf_train(
     checkpoint: Annotated[str, typer.Option(help="save trained encoder under this name")] = "",
     augment: Annotated[bool, typer.Option(help="distill under many system prompts")] = False,
     subsample: Annotated[bool, typer.Option(help="re-sample teacher distractors/step")] = False,
+    placement: Annotated[
+        str,
+        typer.Option(help="concept slot: prefix|before_entity|after_entity|replace_entity"),
+    ] = "prefix",
     metrics_out: Annotated[str, typer.Option(help="write final metrics JSON to this path")] = "",
     wandb: Annotated[bool, typer.Option(help="log to Weights & Biases")] = False,
     wandb_project: Annotated[str, typer.Option()] = "conceptformer-v2",
@@ -689,6 +693,7 @@ def cf_train(
         rag_context_tokens=1024,
         augment_systems=AUGMENT_SYSTEMS if augment else (),
         subsample_neighbors=subsample,
+        placement=placement,
         seed=seed,
     )
     trainer = ConceptTrainer(backbone, cfg)
@@ -704,7 +709,8 @@ def cf_train(
             config={
                 "k": k, "d_model": d_model, "n_layers": n_layers, "lr": lr,
                 "temperature": temperature, "steps": steps, "batch": batch,
-                "augment": augment, "dataset": dataset, "snapshot": snapshot,
+                "augment": augment, "subsample": subsample, "placement": placement,
+                "dataset": dataset, "snapshot": snapshot,
                 "trainable_params": sum(p.numel() for p in trainer.model.parameters()),
             },
         )
@@ -840,7 +846,7 @@ def cf_train(
                 metadata={
                     "k": k, "d_model": d_model, "n_layers": n_layers, "steps": steps,
                     "dataset": dataset, "snapshot": snapshot, "subsample": subsample,
-                    "augment": augment, "seed": seed,
+                    "augment": augment, "placement": placement, "seed": seed,
                     "held_out_concept_acc": last_metrics.get("concept_acc"),
                     "held_in_concept_acc": last_metrics.get("held_in_concept_acc"),
                     "popqa_concept_acc": last_metrics.get("popqa_concept_acc"),

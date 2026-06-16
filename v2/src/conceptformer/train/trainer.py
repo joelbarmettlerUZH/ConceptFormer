@@ -61,6 +61,32 @@ def _chunks(seq: list, size: int) -> list[list]:
     return [seq[i : i + size] for i in range(0, len(seq), size)]
 
 
+def place_concept_slot(question: str, entity_label: str | None, placement: str) -> str:
+    """Return the user-message content with ``_SENTINEL`` marking the concept-token slot.
+
+    ``prefix`` puts the slot at the message start. The entity-relative modes locate
+    ``entity_label`` (case-insensitive) in ``question`` and splice the slot before / after / in
+    place of it; if the label isn't present verbatim they fall back to ``prefix``. Pure function
+    (no model state) so the placement logic is unit-testable in isolation.
+    """
+    if placement == "prefix" or not entity_label:
+        return _SENTINEL + f"\n\n{question}"
+    idx = question.lower().find(entity_label.lower())
+    if idx < 0:
+        return _SENTINEL + f"\n\n{question}"  # entity not mentioned verbatim -> prefix
+    end = idx + len(entity_label)
+    before, ent, after = question[:idx], question[idx:end], question[end:]
+    if placement == "before_entity":
+        q = f"{before}{_SENTINEL} {ent}{after}"
+    elif placement == "after_entity":
+        q = f"{before}{ent} {_SENTINEL}{after}"
+    elif placement == "replace_entity":
+        q = f"{before}{_SENTINEL}{after}"
+    else:
+        raise ValueError(f"unknown placement {placement!r}")
+    return f"\n\n{q}"
+
+
 @dataclass
 class TrainConfig:
     k: int = 8
@@ -87,6 +113,12 @@ class TrainConfig:
     # teacher path (no cache) since the teacher target varies per step.
     subsample_neighbors: bool = False
     seed: int = 0
+    # Where the k concept tokens are spliced into the student's user message, relative to the
+    # entity mention: "prefix" (message start, the default/baseline), "before_entity",
+    # "after_entity", or "replace_entity" (the entity surface form is removed and the concepts
+    # stand in for it). Non-prefix modes locate the entity by its label in the question text and
+    # fall back to "prefix" if it isn't found verbatim. Teacher-side text is unchanged.
+    placement: str = "prefix"
 
 
 @dataclass
@@ -102,7 +134,8 @@ class Prepared:
 
     qid: str
     teacher_ctx_ids: list[int]
-    student_tail_ids: list[int]
+    student_head_ids: list[int]  # tokens BEFORE the concept slot (system + any question prefix)
+    student_tail_ids: list[int]  # tokens AFTER the concept slot (rest of question + chat close)
     path: list[int]
     teacher_hidden: Tensor | None = None
     system_idx: int = 0  # which augmentation system prompt this row was built under
@@ -161,7 +194,6 @@ class ConceptTrainer:
         self._feat_cache: dict[str, SubgraphFeatures] = {}
         # System prompts for augmentation (defaults to a single neutral one if not augmenting).
         self._systems = list(config.augment_systems) or [TEACHER_SYSTEM]
-        self._head_ids_by_system: dict[int, list[int]] = {}
         self._sub_rng = random.Random(config.seed)  # re-samples distractors when subsampling
         # Default eval set (held-out), populated by setup_eval; brackets static across training.
         self._eval: EvalSet | None = None
@@ -265,35 +297,33 @@ class ConceptTrainer:
         """
         batch = [(sg, q, p, aq) for sg, q, p, aq in batch if p]
         concepts = self._encode_concepts([self._cached_features(sg) for sg, *_ in batch])
-        head_emb = self._embed(self._student_head_ids())
         rng = self._sub_rng if self.cfg.subsample_neighbors else None
         teacher_embeds, teacher_ctx, path_lens = [], [], []
         student_embeds, student_ctx, paths = [], [], []
         for i, (sg, question, path, answer_qid) in enumerate(batch):
             facts = self._facts(sg, answer_qid, rng)
             ctx_ids = self._ids(self._render(TEACHER_SYSTEM, f"{facts}\n\n{question}"))
-            _, tail_text = self._render(TEACHER_SYSTEM, _SENTINEL + f"\n\n{question}").split(
-                _SENTINEL
-            )
-            tail_ids = self._ids(tail_text)
+            label = sg.center.label or sg.center.qid
+            head_ids, tail_ids = self._student_split(TEACHER_SYSTEM, question, label)
             teacher_embeds.append(self._embed(ctx_ids + path))
             teacher_ctx.append(len(ctx_ids))
             path_lens.append(len(path))
             paths.append(path)
-            student_embeds.append(torch.cat([head_emb, concepts[i], self._embed(tail_ids + path)]))
-            student_ctx.append(len(self._student_head_ids()) + self.cfg.k + len(tail_ids))
+            student_embeds.append(
+                torch.cat([self._embed(head_ids), concepts[i], self._embed(tail_ids + path)])
+            )
+            student_ctx.append(len(head_ids) + self.cfg.k + len(tail_ids))
         return self._forward_kl(
             teacher_embeds, teacher_ctx, student_embeds, student_ctx, path_lens, paths
         )
 
-    def _student_head_ids(self, system_idx: int = 0) -> list[int]:
-        """The student prefix (system + user header, before the concepts), cached per system."""
-        if system_idx not in self._head_ids_by_system:
-            head_text, _ = self._render(self._systems[system_idx], _SENTINEL + "\n\nx").split(
-                _SENTINEL
-            )
-            self._head_ids_by_system[system_idx] = self._ids(head_text)
-        return self._head_ids_by_system[system_idx]
+    def _student_split(
+        self, system: str, question: str, entity_label: str | None
+    ) -> tuple[list[int], list[int]]:
+        """Token ids (before, after) the concept slot for this (system, question, placement)."""
+        slot = place_concept_slot(question, entity_label, self.cfg.placement)
+        head_text, tail_text = self._render(system, slot).split(_SENTINEL)
+        return self._ids(head_text), self._ids(tail_text)
 
     def prepare(self, items: list[tuple[Subgraph, str, list[int], str | None]]) -> list[Prepared]:
         """Deterministic preprocessing once, expanded over the augmentation system prompts.
@@ -311,13 +341,11 @@ class ConceptTrainer:
             if qid not in self._feat_cache:
                 self._feat_cache[qid] = featurize_subgraph(sg, self.bb.embed_labels)
             facts = self._facts(sg, answer_qid)
-            _, tail_text = self._render(self._systems[0], _SENTINEL + f"\n\n{question}").split(
-                _SENTINEL
-            )
-            tail_ids = self._ids(tail_text)  # system-agnostic (after the user-content start)
+            label = sg.center.label or sg.center.qid
             for si, system in enumerate(self._systems):
                 ctx_ids = self._ids(self._render(system, f"{facts}\n\n{question}"))
-                prepared.append(Prepared(qid, ctx_ids, tail_ids, path, system_idx=si))
+                head_ids, tail_ids = self._student_split(system, question, label)
+                prepared.append(Prepared(qid, ctx_ids, head_ids, tail_ids, path, system_idx=si))
         if self.cfg.cache_teacher:
             self._cache_teacher_hidden(prepared)  # one-time frozen-teacher pass (per system)
         return prepared
@@ -373,12 +401,11 @@ class ConceptTrainer:
         concepts = self._encode_concepts([self._feat_cache[p.qid] for p in batch])
         student_embeds, student_ctx, path_lens = [], [], []
         for i, p in enumerate(batch):
-            head_ids = self._student_head_ids(p.system_idx)  # per-sampled-system prefix
-            head_emb = self._embed(head_ids)
+            head_emb = self._embed(p.student_head_ids)
             student_embeds.append(
                 torch.cat([head_emb, concepts[i], self._embed(p.student_tail_ids + p.path)])
             )
-            student_ctx.append(len(head_ids) + self.cfg.k + len(p.student_tail_ids))
+            student_ctx.append(len(p.student_head_ids) + self.cfg.k + len(p.student_tail_ids))
             path_lens.append(len(p.path))
 
         if batch[0].teacher_hidden is not None:
@@ -451,12 +478,13 @@ class ConceptTrainer:
         concepts = self._encode_concepts(
             [featurize_subgraph(sg, self.bb.embed_labels) for sg, _ in items]
         )
-        head_text, _ = self._render(system, _SENTINEL + "\n\nx").split(_SENTINEL)
-        head_emb = self._embed(self._ids(head_text))
         seqs = []
-        for i, (_, question) in enumerate(items):
-            _, tail = self._render(system, _SENTINEL + f"\n\n{question}").split(_SENTINEL)
-            seqs.append(torch.cat([head_emb, concepts[i], self._embed(self._ids(tail))], dim=0))
+        for i, (sg, question) in enumerate(items):
+            label = sg.center.label or sg.center.qid
+            head_ids, tail_ids = self._student_split(system, question, label)
+            seqs.append(
+                torch.cat([self._embed(head_ids), concepts[i], self._embed(tail_ids)], dim=0)
+            )
         in_embeds, attn = self._left_pad_embeds(seqs)
         gen = self.bb.model.generate(
             inputs_embeds=in_embeds, attention_mask=attn, max_new_tokens=max_new,
