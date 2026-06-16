@@ -16,16 +16,27 @@ Established protocol going forward: **subsample OFF (cached), report mean±std o
 
 ## PHASE 2 — Stabilize training (IN PROGRESS) — blocks everything below
 Goal: drive the across-seed std down until ~3–5 pt effects are detectable with ≤3 seeds.
+Goal is OUTCOME stability (low across-run spread), NOT bit-reproducibility.
 
-- [~] **2.1 Round 1 — measure the noise floor.** `scripts/variance_study.sh` (running, task bdfk4s0im).
-      baseline(s0,s0repro,s1,s2) + batch64(s0,s1), aug-off/prefix/k8/d1024/L4, 36k, seeded.
-      Reads: same-seed final gap (s0 vs s0repro), across-seed std, batch64 vs baseline.
-      Watcher buux4huod reports the same-seed comparison when the pair converges (~2h).
-- [ ] **2.2 Round 1 verdict** → record the noise floor in RESEARCH_FINDINGS.md (update F8).
-- [ ] **2.3 Round 2 — stabilization arms (test several, pick winner).** Levers ready & committed
-      (39c27e5): `--ema-decay`, `--gate-mode none`, `--grad-clip` (+ warmup/lr). Run each ×3 seeds,
-      keep whichever MINIMIZES across-seed std while holding accuracy. Likely combine winners.
-- [ ] **2.4 Lock the stabilized config** (the standard for all Phase-3 runs); document it.
+- [~] **2.1 Round 1 — noise floor + reproducibility + first mitigation.** `scripts/variance_study.sh`
+      (running, task bdfk4s0im). baseline(s0,s0repro,s1,s2) + batch64(s0,s1), aug-off/prefix/k8/
+      d1024/L4, 36k, seeded. Three reads: (a) same-seed final gap s0 vs s0repro [is the variance
+      INIT or CUDA?], (b) across-seed std s0/s1/s2 [the noise floor], (c) batch64 vs baseline.
+      Watcher buux4huod reports the same-seed full-trajectory comparison when the pair converges.
+- [ ] **2.2 Nail down the cause + record (update F8).** From round 1, conclude init vs CUDA vs
+      general sensitivity; write the measured noise floor + reproducibility verdict into
+      RESEARCH_FINDINGS.md F8; decide the round-2 strategy.
+- [ ] **2.2b CONDITIONAL — full-determinism fallback.** ONLY if 2.1(a) shows CUDA nondeterminism
+      drives large outcome divergence: try `torch.use_deterministic_algorithms(True)` +
+      `CUBLAS_WORKSPACE_CONFIG`; note the speed cost / unsupported-op risk. Skip if init-dominated.
+- [ ] **2.3 Round 2 — stabilization arms (test several, pick winner).** Three arms, each ×3 seeds,
+      keep whichever MINIMIZES across-seed std while holding accuracy; combine winners. Levers ready
+      & committed (39c27e5):
+        - EMA (`--ema-decay`)  - gate-none (`--gate-mode none`)  - gentler-opt (`--grad-clip` + longer
+          `warmup` / lower `lr`). (gate-LR / gate-warmup tuning also available within the gate arm.)
+- [ ] **2.4 Validate the winner at the FULL 72k horizon** (rounds 1–2 run 36k for speed) — confirm
+      the across-seed std holds and accuracy isn't sacrificed before committing.
+- [ ] **2.5 Lock the stabilized config** (the standard for all Phase-3 runs); document in TODO + findings.
 
 ## PHASE 3 — Re-run the invalidated experiments (stabilized + ≥3 seeds, mean±std)
 Each effect is only claimed if it clears the Phase-2 noise band.
