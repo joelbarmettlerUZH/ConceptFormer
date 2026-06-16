@@ -198,9 +198,13 @@ class ConceptTrainer:
         self.model.train()
         # The gate gets its own (higher) LR: with a shared 1e-4 it stays near 0, which zeroes the
         # gradient to the encoder (grad ∝ tanh(gate)) — a dead zone where nothing learns.
-        groups: list[dict] = [{"params": self.model.encoder.parameters(), "lr": config.lr}]
+        groups: list[dict] = [
+            {"params": self.model.encoder.parameters(), "lr": config.lr, "name": "encoder"}
+        ]
         if self.model.gate is not None:
-            groups.append({"params": self.model.gate.parameters(), "lr": config.gate_lr})
+            groups.append(
+                {"params": self.model.gate.parameters(), "lr": config.gate_lr, "name": "gate"}
+            )
         self.opt = torch.optim.AdamW(groups)
         self.sched = (
             torch.optim.lr_scheduler.LambdaLR(self.opt, self._lr_factor)
@@ -223,6 +227,7 @@ class ConceptTrainer:
             }
         # Default eval set (held-out), populated by setup_eval; brackets static across training.
         self._eval: EvalSet | None = None
+        self.last_grad_norm = 0.0  # pre-clip total grad-norm of the last step (logged each step)
         # Cache of frozen base/teacher PopQA brackets per item-set (so a per-checkpoint PopQA
         # trajectory only re-runs the student). Keyed by id(items).
         self._popqa_brackets: dict[int, tuple[float, float]] = {}
@@ -451,8 +456,9 @@ class ConceptTrainer:
     def _apply(self, loss: Tensor) -> float:
         self.opt.zero_grad()
         loss.backward()
-        if self.cfg.grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip)
+        # Always record the pre-clip total grad-norm (a key instability signal); clip if enabled.
+        clip = self.cfg.grad_clip if self.cfg.grad_clip > 0 else float("inf")
+        self.last_grad_norm = float(torch.nn.utils.clip_grad_norm_(self.model.parameters(), clip))
         self.opt.step()
         if self.sched is not None:
             self.sched.step()

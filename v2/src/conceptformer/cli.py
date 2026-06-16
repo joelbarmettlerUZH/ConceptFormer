@@ -714,12 +714,17 @@ def cf_train(
             name=checkpoint or None,
             config={
                 "k": k, "d_model": d_model, "n_layers": n_layers, "lr": lr,
-                "temperature": temperature, "steps": steps, "batch": batch,
-                "augment": augment, "subsample": subsample, "placement": placement,
-                "grad_clip": grad_clip, "ema_decay": ema_decay, "gate_mode": gate_mode,
-                "seed": seed,
+                "gate_lr": cfg.gate_lr, "temperature": temperature, "ce_weight": cfg.ce_weight,
+                "steps": steps, "batch": batch, "warmup_steps": cfg.warmup_steps,
+                "rag_context_tokens": cfg.rag_context_tokens, "val_frac": val_frac,
+                "eval_n": eval_n, "augment": augment, "subsample": subsample,
+                "placement": placement, "grad_clip": grad_clip, "ema_decay": ema_decay,
+                "gate_mode": gate_mode, "seed": seed, "model": model,
                 "dataset": dataset, "snapshot": snapshot,
-                "trainable_params": sum(p.numel() for p in trainer.model.parameters()),
+                "n_train": len(train_tuples), "n_val": len(val_rows),
+                "trainable_params": sum(
+                    p.numel() for p in trainer.model.parameters() if p.requires_grad
+                ),
             },
         )
 
@@ -779,9 +784,12 @@ def cf_train(
             last_metrics["held_in_concept_acc"] = mi["concept_acc"]
             last_metrics["held_in_val_kl"] = mi["val_kl"]
             log["held_in/concept_acc"] = mi["concept_acc"]
+            log["held_in/base_acc"] = mi["base_acc"]
+            log["held_in/teacher_acc"] = mi["teacher_acc"]
             log["held_in/val_kl"] = mi["val_kl"]
             # gen-gap > 0 => fits trained questions better than held-out (overfitting signal).
             log["gen_gap/concept_acc"] = mi["concept_acc"] - m["concept_acc"]
+            log["gen_gap/val_kl"] = m["val_kl"] - mi["val_kl"]
             line += f"  | held_in={mi['concept_acc']:.1%}"
         if popqa_items:
             pm = trainer.evaluate_popqa(popqa_items, eval_system=eval_system, cache_brackets=True)
@@ -796,6 +804,15 @@ def cf_train(
                 log["gate/max"] = max(gates)
                 log["gate/min"] = min(gates)
                 log["gate/mean"] = sum(gates) / len(gates)
+                log["gate/abs_mean"] = sum(abs(g) for g in gates) / len(gates)
+                for i, g in enumerate(gates):  # per-token gate config (was only in checkpoints)
+                    log[f"gate/t{i}"] = g
+            # concept-vector norm on a fixed eval entity (encoder output magnitude over training).
+            if eval_val:
+                log["concept/norm"] = trainer.concept_norm(sg_by_qid[eval_val[0].subject_qid])
+            # both param-group LRs (encoder + gate may differ / be scheduled independently).
+            for grp in trainer.opt.param_groups:
+                log[f"train/lr_{grp.get('name', 'g')}"] = grp["lr"]
             log["train/lr"] = trainer.opt.param_groups[0]["lr"]
             wb.log(log, step=step)
         return m
@@ -813,7 +830,14 @@ def cf_train(
     for s in range(1, steps + 1):
         loss = step_fn(rng.sample(train_pool, min(batch, len(train_pool))))
         if wb and s % 25 == 0:
-            wb.log({"train/loss": loss, "train/lr": trainer.opt.param_groups[0]["lr"]}, step=s)
+            step_log = {
+                "train/loss": loss,
+                "train/grad_norm": trainer.last_grad_norm,
+                "train/lr": trainer.opt.param_groups[0]["lr"],
+            }
+            for grp in trainer.opt.param_groups:
+                step_log[f"train/lr_{grp.get('name', 'g')}"] = grp["lr"]
+            wb.log(step_log, step=s)
         if s % eval_every == 0 or s == steps:
             report(f"step {s}", s)
 
