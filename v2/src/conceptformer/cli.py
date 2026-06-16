@@ -717,27 +717,72 @@ def cf_train(
 
     last_metrics: dict = {}
 
+    # Build the auxiliary eval sets ONCE up front so report() can score them EVERY checkpoint
+    # (trajectories, not just end-of-run scalars):
+    #  - held-IN: a sample of TRAINED questions -> watch the generalization gap (overfit) develop.
+    #  - PopQA: UNSEEN entities -> watch external entity-generalization over training.
+    from conceptformer.train.harness import is_answerable
+
+    held_in_rows = [r for r in train_rows if is_answerable(r) and r.subject_qid in sg_by_qid]
+    train_sample = rng.sample(held_in_rows, min(len(eval_val), len(held_in_rows)))
+    held_in_eval = (
+        trainer.build_eval(train_sample, sg_by_qid, eval_system=eval_system)
+        if train_sample
+        else None
+    )
+
+    popqa_items: list = []
+    if popqa_eval:
+        from conceptformer.data.benchmarks import load_popqa
+
+        popqa_sgs = {
+            sg.center.qid: sg for sg in iter_subgraphs(settings.snapshots_dir / popqa_snapshot)
+        }
+        examples = [e for e in load_popqa() if e.subject_qid in popqa_sgs and e.answer_labels]
+        rng.shuffle(examples)
+        for e in examples[: popqa_eval * 2]:  # over-sample; some neighborhoods may be empty
+            sg = popqa_sgs[e.subject_qid]
+            if sg.edges:
+                popqa_items.append((sg, e.question, e.answer_labels, e.answer_qid))
+            if len(popqa_items) >= popqa_eval:
+                break
+
     def report(tag: str, step: int = 0) -> dict:
-        m = trainer.evaluate()
+        m = trainer.evaluate()  # held-out (the default stored set)
         last_metrics.update(m)
-        rprint(
-            f"  [{tag}] val_KL={m['val_kl']:.3f}  "
-            f"[bold]concept_acc={m['concept_acc']:.1%}[/]  "
+        log: dict = {
+            "held_out/concept_acc": m["concept_acc"],
+            "held_out/base_acc": m["base_acc"],
+            "held_out/teacher_acc": m["teacher_acc"],
+            "held_out/val_kl": m["val_kl"],
+        }
+        line = (
+            f"  [{tag}] val_KL={m['val_kl']:.3f}  [bold]concept_acc={m['concept_acc']:.1%}[/]  "
             f"base={m['base_acc']:.1%}  teacher(RAG)={m['teacher_acc']:.1%}  (n={m['n_acc']})"
         )
+        if held_in_eval is not None:
+            mi = trainer.evaluate(held_in_eval)
+            last_metrics["held_in_concept_acc"] = mi["concept_acc"]
+            last_metrics["held_in_val_kl"] = mi["val_kl"]
+            log["held_in/concept_acc"] = mi["concept_acc"]
+            log["held_in/val_kl"] = mi["val_kl"]
+            # gen-gap > 0 => fits trained questions better than held-out (overfitting signal).
+            log["gen_gap/concept_acc"] = mi["concept_acc"] - m["concept_acc"]
+            line += f"  | held_in={mi['concept_acc']:.1%}"
+        if popqa_items:
+            pm = trainer.evaluate_popqa(popqa_items, eval_system=eval_system, cache_brackets=True)
+            for kk in ("concept_acc", "base_acc", "teacher_acc"):
+                last_metrics[f"popqa_{kk}"] = pm[kk]
+                log[f"popqa/{kk}"] = pm[kk]
+            line += f"  | popqa={pm['concept_acc']:.1%}"
+        rprint(line)
         if wb:
             gates = trainer.gate_values()
-            wb.log(
-                {
-                    "held_out/concept_acc": m["concept_acc"],
-                    "held_out/base_acc": m["base_acc"],
-                    "held_out/teacher_acc": m["teacher_acc"],
-                    "held_out/val_kl": m["val_kl"],
-                    "gate/max": max(gates),
-                    "gate/min": min(gates),
-                },
-                step=step,
-            )
+            log["gate/max"] = max(gates)
+            log["gate/min"] = min(gates)
+            log["gate/mean"] = sum(gates) / len(gates)
+            log["train/lr"] = trainer.opt.param_groups[0]["lr"]
+            wb.log(log, step=step)
         return m
 
     if subsample:
@@ -757,53 +802,53 @@ def cf_train(
         if s % eval_every == 0 or s == steps:
             report(f"step {s}", s)
 
-    # Held-IN accuracy (a sample of TRAINED questions) disambiguates overfitting from underfitting.
-    from conceptformer.train.harness import is_answerable
-
-    held_in = [r for r in train_rows if is_answerable(r) and r.subject_qid in sg_by_qid]
-    train_sample = rng.sample(held_in, min(len(eval_val), len(held_in)))
-    trainer.setup_eval(train_sample, sg_by_qid, eval_system=eval_system)  # held-in sample
-    tm = trainer.evaluate()
-    rprint(
-        f"  [held-IN sample] concept_acc={tm['concept_acc']:.1%}  KL={tm['val_kl']:.3f}  "
-        f"(n={tm['n_acc']}) — high held-in + low held-out = overfit; both low = undertrained"
-    )
+    # held-in / PopQA were scored every checkpoint inside report() (full trajectories in W&B).
+    # Echo the final overfit-vs-underfit read and mirror the converged values into the summary.
+    hi_final = last_metrics.get("held_in_concept_acc")
+    if hi_final is not None:
+        rprint(
+            f"  [held-IN final] concept_acc={hi_final:.1%}  "
+            f"KL={last_metrics.get('held_in_val_kl', 0.0):.3f} — "
+            "high held-in + low held-out = overfit; both low = undertrained"
+        )
+    if popqa_items:
+        rprint(
+            f"  [PopQA final, UNSEEN n={len(popqa_items)}] "
+            f"concept_acc={last_metrics.get('popqa_concept_acc', 0.0):.1%}  "
+            f"base={last_metrics.get('popqa_base_acc', 0.0):.1%}  "
+            f"teacher(RAG)={last_metrics.get('popqa_teacher_acc', 0.0):.1%}"
+        )
     if wb:
-        wb.summary["held_in/concept_acc"] = tm["concept_acc"]
-        wb.summary["held_in/val_kl"] = tm["val_kl"]
         wb.summary["held_out/concept_acc_final"] = last_metrics.get("concept_acc")
+        if hi_final is not None:
+            wb.summary["held_in/concept_acc"] = hi_final
+            wb.summary["held_in/val_kl"] = last_metrics.get("held_in_val_kl")
+        if popqa_items:
+            for kk in ("concept_acc", "base_acc", "teacher_acc"):
+                wb.summary[f"popqa/{kk}"] = last_metrics.get(f"popqa_{kk}")
 
     if checkpoint:
         ckpt_path = settings.data_root / "checkpoints" / f"{checkpoint}.pt"
         trainer.save_checkpoint(ckpt_path)
         rprint(f"[green]saved checkpoint[/] → {ckpt_path}")
-
-    if popqa_eval:
-        from conceptformer.data.benchmarks import load_popqa
-
-        popqa_sgs = {
-            sg.center.qid: sg
-            for sg in iter_subgraphs(settings.snapshots_dir / popqa_snapshot)
-        }
-        examples = [e for e in load_popqa() if e.subject_qid in popqa_sgs and e.answer_labels]
-        rng.shuffle(examples)
-        items = []
-        for e in examples[: popqa_eval * 2]:  # over-sample; some neighborhoods may be empty
-            sg = popqa_sgs[e.subject_qid]
-            if sg.edges:
-                items.append((sg, e.question, e.answer_labels, e.answer_qid))
-            if len(items) >= popqa_eval:
-                break
-        rprint(f"[bold]PopQA (UNSEEN entities, n={len(items)})[/] — external generalization:")
-        pm = trainer.evaluate_popqa(items, eval_system=eval_system)
-        rprint(
-            f"  [bold]concept_acc={pm['concept_acc']:.1%}[/]  "
-            f"base={pm['base_acc']:.1%}  teacher(RAG)={pm['teacher_acc']:.1%}"
-        )
         if wb:
-            wb.summary["popqa/concept_acc"] = pm["concept_acc"]
-            wb.summary["popqa/base_acc"] = pm["base_acc"]
-            wb.summary["popqa/teacher_acc"] = pm["teacher_acc"]
+            # Push the trained encoder+gate to W&B as a durable, versioned model artifact so the
+            # checkpoint behind every result survives this machine (data/ is git-ignored & local).
+            art = _wandb.Artifact(
+                checkpoint,
+                type="model",
+                metadata={
+                    "k": k, "d_model": d_model, "n_layers": n_layers, "steps": steps,
+                    "dataset": dataset, "snapshot": snapshot, "subsample": subsample,
+                    "augment": augment, "seed": seed,
+                    "held_out_concept_acc": last_metrics.get("concept_acc"),
+                    "held_in_concept_acc": last_metrics.get("held_in_concept_acc"),
+                    "popqa_concept_acc": last_metrics.get("popqa_concept_acc"),
+                },
+            )
+            art.add_file(str(ckpt_path))
+            wb.log_artifact(art)
+            rprint(f"[green]logged W&B artifact[/] model:{checkpoint}")
 
     if wb:
         wb.finish()
@@ -813,10 +858,16 @@ def cf_train(
         result = {
             "config": {"k": k, "steps": steps, "batch": batch, "augment": augment, "seed": seed},
             "held_out": {kk: last_metrics.get(kk) for kk in ho_keys},
-            "held_in": {"concept_acc": tm["concept_acc"], "val_kl": tm["val_kl"]},
+            "held_in": {
+                "concept_acc": last_metrics.get("held_in_concept_acc"),
+                "val_kl": last_metrics.get("held_in_val_kl"),
+            },
             "popqa": (
-                {kk: pm[kk] for kk in ("concept_acc", "base_acc", "teacher_acc")}
-                if popqa_eval
+                {
+                    kk: last_metrics.get(f"popqa_{kk}")
+                    for kk in ("concept_acc", "base_acc", "teacher_acc")
+                }
+                if popqa_items
                 else None
             ),
         }
@@ -826,6 +877,116 @@ def cf_train(
         rprint(f"[green]metrics[/] → {out_path}")
 
     rprint("[green]done[/] — concept_acc on HELD-OUT questions is the generalization signal.")
+
+
+@app.command("eval-prompt-robustness")
+def eval_prompt_robustness(
+    checkpoint: Annotated[str, typer.Option(help="checkpoint name under data/checkpoints or path")],
+    dataset: Annotated[str, typer.Option()] = "cftrain_qa_10k",
+    snapshot: Annotated[str, typer.Option()] = "cftrain_10k",
+    popqa_snapshot: Annotated[str, typer.Option()] = "popqa_full",
+    eval_n: Annotated[int, typer.Option(help="held-out questions scored per prompt")] = 200,
+    popqa_n: Annotated[int, typer.Option(help="PopQA (unseen entity) questions per prompt")] = 200,
+    val_frac: Annotated[float, typer.Option()] = 0.3,
+    seed: Annotated[int, typer.Option()] = 0,
+    model: Annotated[str, typer.Option()] = "Qwen/Qwen3-0.6B",
+    device: Annotated[str, typer.Option()] = "cuda",
+) -> None:
+    """Score a trained concept-token checkpoint under MANY system prompts to measure robustness.
+
+    A single-prompt accuracy hides whether the concept vectors are coupled to the training prompt.
+    This evals held-out questions AND unseen-entity PopQA under each augmentation prompt plus a
+    held-OUT prompt, and reports the spread (mean / std / worst-case) -- low variance and a high
+    floor = prompt-robust vectors. Use it to compare two checkpoints (e.g. subsample on vs off).
+    """
+    import random
+    import statistics
+
+    import torch
+
+    from conceptformer.data.benchmarks import load_popqa
+    from conceptformer.data.snapshot import iter_subgraphs
+    from conceptformer.generate.dataset import load_cftrain_qa
+    from conceptformer.model.backbone import Backbone
+    from conceptformer.model.chat import ChatModel
+    from conceptformer.train.harness import split_by_held_out_questions
+    from conceptformer.train.trainer import (
+        AUGMENT_SYSTEMS,
+        HELD_OUT_EVAL_SYSTEM,
+        TEACHER_SYSTEM,
+        ConceptTrainer,
+        TrainConfig,
+    )
+
+    ckpt_path = Path(checkpoint)
+    if not ckpt_path.exists():
+        ckpt_path = settings.data_root / "checkpoints" / f"{checkpoint}.pt"
+    if not ckpt_path.exists():
+        # Fall back to the W&B model artifact so a result is reproducible without the local file.
+        import wandb as _wandb
+
+        rprint(f"[dim]checkpoint not local; pulling W&B artifact model:{checkpoint}:latest…[/dim]")
+        api = _wandb.Api()
+        art = api.artifact(
+            f"university-of-zurich/conceptformer-v2/{checkpoint}:latest", type="model"
+        )
+        ckpt_path = Path(art.download()) / f"{checkpoint}.pt"
+    blob = torch.load(ckpt_path, map_location=device, weights_only=False)
+    cfg = TrainConfig(**blob["config"])
+    backbone = Backbone(ChatModel(model, device=device))
+    trainer = ConceptTrainer(backbone, cfg)
+    trainer.model.load_state_dict(blob["model"])
+    trainer.model.eval()
+    rprint(
+        f"[bold]loaded[/] {ckpt_path.name}  "
+        f"(k={cfg.k}, d_model={cfg.d_model}, n_layers={cfg.n_layers})"
+    )
+
+    qa_dir = settings.data_root / "cf_train" / dataset
+    rows = load_cftrain_qa(qa_dir / "qa_distill.jsonl")
+    sg_by_qid = {sg.center.qid: sg for sg in iter_subgraphs(settings.snapshots_dir / snapshot)}
+    _, val_rows = split_by_held_out_questions(rows, val_frac=val_frac, seed=seed)
+    val_rows = [r for r in val_rows if r.subject_qid in sg_by_qid]
+    rng = random.Random(seed)
+    eval_val = rng.sample(val_rows, min(eval_n, len(val_rows)))
+
+    popqa_sgs = {
+        sg.center.qid: sg for sg in iter_subgraphs(settings.snapshots_dir / popqa_snapshot)
+    }
+    examples = [e for e in load_popqa() if e.subject_qid in popqa_sgs and e.answer_labels]
+    rng.shuffle(examples)
+    popqa_items = []
+    for e in examples[: popqa_n * 2]:
+        sg = popqa_sgs[e.subject_qid]
+        if sg.edges:
+            popqa_items.append((sg, e.question, e.answer_labels, e.answer_qid))
+        if len(popqa_items) >= popqa_n:
+            break
+
+    # TEACHER_SYSTEM + the 5 augmentation prompts were all SEEN-style training prompts here (this
+    # checkpoint trained under TEACHER_SYSTEM only); HELD_OUT_EVAL_SYSTEM is a never-seen phrasing.
+    prompts = [("teacher", TEACHER_SYSTEM), ("held_out_prompt", HELD_OUT_EVAL_SYSTEM)]
+    prompts += [(f"aug{i+1}", s) for i, s in enumerate(AUGMENT_SYSTEMS)]
+
+    rprint(f"[bold]prompt-robustness[/] over {len(prompts)} system prompts "
+           f"(held-out n={len(eval_val)}, PopQA n={len(popqa_items)}):")
+    ho_accs, pq_accs = [], []
+    rprint(f"  {'prompt':>16} {'held_out':>9} {'popqa':>7}")
+    for name, system in prompts:
+        es = trainer.build_eval(eval_val, sg_by_qid, eval_system=system)
+        ho = trainer.evaluate(es)["concept_acc"]
+        pq = trainer.evaluate_popqa(popqa_items, eval_system=system)["concept_acc"]
+        ho_accs.append(ho)
+        pq_accs.append(pq)
+        rprint(f"  {name:>16} {ho:>9.1%} {pq:>7.1%}")
+
+    def stats(xs: list[float]) -> str:
+        sd = statistics.pstdev(xs) if len(xs) > 1 else 0.0
+        return f"mean={statistics.mean(xs):.1%}  std={sd:.1%}  min={min(xs):.1%}  max={max(xs):.1%}"
+
+    rprint(f"  [bold]held_out[/]: {stats(ho_accs)}")
+    rprint(f"  [bold]popqa[/]:    {stats(pq_accs)}")
+    rprint("[dim]low std + high min across prompts = prompt-robust concept vectors[/dim]")
 
 
 @app.command("cf-sweep")

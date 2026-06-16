@@ -108,6 +108,24 @@ class Prepared:
     system_idx: int = 0  # which augmentation system prompt this row was built under
 
 
+@dataclass
+class EvalSet:
+    """A self-contained, prepared evaluation set (held-out OR held-in OR any sample).
+
+    Holds everything ``evaluate`` needs so multiple sets can be scored per checkpoint without
+    clobbering shared trainer state. ``base``/``teacher`` accuracy is the frozen model's bracket
+    on this set (constant across training, so computed once when the set is built).
+    """
+
+    items: list
+    prepared: list[Prepared]
+    base: float
+    teacher: float
+    system: str = TEACHER_SYSTEM
+    max_new: int = 32
+    gen_batch: int = 48
+
+
 class ConceptTrainer:
     """Holds the frozen backbone + trainable ConceptFormer and runs distillation steps."""
 
@@ -145,14 +163,11 @@ class ConceptTrainer:
         self._systems = list(config.augment_systems) or [TEACHER_SYSTEM]
         self._head_ids_by_system: dict[int, list[int]] = {}
         self._sub_rng = random.Random(config.seed)  # re-samples distractors when subsampling
-        # Held-out eval state (populated by setup_eval; brackets are static across training).
-        self._eval_items: list = []
-        self._eval_prepared: list[Prepared] = []
-        self._eval_system = TEACHER_SYSTEM
-        self._eval_base = 0.0
-        self._eval_teacher = 0.0
-        self._eval_max_new = 32
-        self._eval_gen_batch = 48
+        # Default eval set (held-out), populated by setup_eval; brackets static across training.
+        self._eval: EvalSet | None = None
+        # Cache of frozen base/teacher PopQA brackets per item-set (so a per-checkpoint PopQA
+        # trajectory only re-runs the student). Keyed by id(items).
+        self._popqa_brackets: dict[int, tuple[float, float]] = {}
 
     def _lr_factor(self, step: int) -> float:
         """Linear warmup then cosine decay (multiplies each param group's base LR)."""
@@ -449,7 +464,7 @@ class ConceptTrainer:
         )
         return [t.strip() for t in self.bb.tokenizer.batch_decode(gen, skip_special_tokens=True)]
 
-    def setup_eval(
+    def build_eval(
         self,
         val_rows: list,
         sg_by_qid: dict,
@@ -457,12 +472,13 @@ class ConceptTrainer:
         eval_system: str = TEACHER_SYSTEM,
         max_new: int = 32,
         gen_batch: int = 48,
-    ) -> int:
-        """Prepare the held-out eval set ONCE and compute the static base/RAG-teacher accuracy.
+    ) -> EvalSet:
+        """Prepare an eval set ONCE and compute its static base/RAG-teacher accuracy.
 
-        Everything is scored under ``eval_system`` — pass a prompt held out of training to test
-        decoupling. Base and teacher are constant across training, so they're generated once here;
-        per-checkpoint ``evaluate`` then only runs the student. Returns the number of scorable rows.
+        Returns a self-contained ``EvalSet`` (does NOT mutate trainer state), so several sets —
+        held-out, held-in, etc. — can be built up front and each scored every checkpoint. Scored
+        under ``eval_system``; base and teacher are the frozen model's brackets (constant across
+        training), generated once here so per-checkpoint ``evaluate`` only runs the student.
         """
         items = [
             (sg_by_qid[r.subject_qid], r.question, list(r.accepted_answers),
@@ -470,11 +486,7 @@ class ConceptTrainer:
             for r in val_rows
             if r.subject_qid in sg_by_qid and r.teacher_target_ids and r.accepted_answers
         ]
-        self._eval_items = items
-        self._eval_system = eval_system
-        self._eval_max_new = max_new
-        self._eval_gen_batch = gen_batch
-        self._eval_prepared = self.prepare([(sg, q, p, aq) for sg, q, _, p, aq in items])
+        prepared = self.prepare([(sg, q, p, aq) for sg, q, _, p, aq in items])
         base_ok = teacher_ok = 0
         for chunk in _chunks(items, gen_batch):
             base = self._generate_text_batch([(eval_system, q) for _, q, _, _, _ in chunk], max_new)
@@ -485,38 +497,58 @@ class ConceptTrainer:
             base_ok += sum(answer_ok(p, g) for p, (*_, g, _, _) in zip(base, chunk, strict=True))
             teacher_ok += sum(answer_ok(p, g) for p, (*_, g, _, _) in zip(rag, chunk, strict=True))
         n = max(1, len(items))
-        self._eval_base, self._eval_teacher = base_ok / n, teacher_ok / n
-        return len(items)
+        return EvalSet(
+            items=items, prepared=prepared, base=base_ok / n, teacher=teacher_ok / n,
+            system=eval_system, max_new=max_new, gen_batch=gen_batch,
+        )
+
+    def setup_eval(
+        self,
+        val_rows: list,
+        sg_by_qid: dict,
+        *,
+        eval_system: str = TEACHER_SYSTEM,
+        max_new: int = 32,
+        gen_batch: int = 48,
+    ) -> int:
+        """Build the DEFAULT (held-out) eval set and store it. Returns the scorable-row count."""
+        self._eval = self.build_eval(
+            val_rows, sg_by_qid, eval_system=eval_system, max_new=max_new, gen_batch=gen_batch
+        )
+        return len(self._eval.items)
 
     @torch.no_grad()
-    def _eval_kl(self) -> float:
+    def _eval_kl(self, prepared: list[Prepared]) -> float:
         total, n = 0.0, 0
-        for chunk in _chunks(self._eval_prepared, 32):
+        for chunk in _chunks(prepared, 32):
             total += float(self.batch_loss_cached(chunk)) * len(chunk)
             n += len(chunk)
         return total / max(1, n)
 
     @torch.no_grad()
-    def evaluate(self) -> dict[str, float]:
-        """Per-checkpoint held-out metrics: batched student accuracy + KL; cached brackets."""
-        items = self._eval_items
-        if not items:
+    def evaluate(self, eval_set: EvalSet | None = None) -> dict[str, float]:
+        """Per-checkpoint metrics for ``eval_set`` (default: the stored held-out set).
+
+        Student accuracy + KL; base/teacher reused from the set (frozen brackets, computed once).
+        """
+        es = eval_set if eval_set is not None else self._eval
+        if es is None or not es.items:
             return dict.fromkeys(("val_kl", "concept_acc", "base_acc", "teacher_acc", "n_acc"), 0.0)
         self.model.eval()
         concept_ok = 0
-        for chunk in _chunks(items, self._eval_gen_batch):
+        for chunk in _chunks(es.items, es.gen_batch):
             gen_items = [(sg, q) for sg, q, _, _, _ in chunk]
-            preds = self.generate_student_batch(gen_items, self._eval_max_new, self._eval_system)
+            preds = self.generate_student_batch(gen_items, es.max_new, es.system)
             golds = [it[2] for it in chunk]
             concept_ok += sum(answer_ok(p, g) for p, g in zip(preds, golds, strict=True))
-        kl = self._eval_kl()
+        kl = self._eval_kl(es.prepared)
         self.model.train()
         return {
             "val_kl": kl,
-            "concept_acc": concept_ok / len(items),
-            "base_acc": self._eval_base,
-            "teacher_acc": self._eval_teacher,
-            "n_acc": len(items),
+            "concept_acc": concept_ok / len(es.items),
+            "base_acc": es.base,
+            "teacher_acc": es.teacher,
+            "n_acc": len(es.items),
         }
 
     @torch.no_grad()
@@ -527,32 +559,43 @@ class ConceptTrainer:
         eval_system: str = TEACHER_SYSTEM,
         max_new: int = 32,
         gen_batch: int = 48,
+        cache_brackets: bool = False,
     ) -> dict[str, float]:
         """External-benchmark accuracy on UNSEEN entities (e.g. PopQA): concept vs base vs RAG.
 
         ``items`` = ``(subject_subgraph, question, answer_aliases, answer_qid)``, scored under
         ``eval_system`` with the alias matcher (so base/RAG here are this model's own brackets under
-        that prompt, not the official PopQA-template numbers).
+        that prompt, not the official PopQA-template numbers). With ``cache_brackets`` the frozen
+        base/teacher accuracy (constant across training) is computed once and reused -- so this can
+        be called every checkpoint for a trajectory while only the student forward re-runs.
         """
         self.model.eval()
+        cached = self._popqa_brackets.get(id(items)) if cache_brackets else None
         concept_ok = base_ok = teacher_ok = 0
         for chunk in _chunks(items, gen_batch):
             concept = self.generate_student_batch(
                 [(sg, q) for sg, q, _, _ in chunk], max_new, eval_system
             )
-            base = self._generate_text_batch([(eval_system, q) for _, q, _, _ in chunk], max_new)
-            rag = self._generate_text_batch(
-                [(eval_system, f"{self._facts(sg, aq)}\n\n{q}") for sg, q, _, aq in chunk], max_new
-            )
             concept_ok += sum(answer_ok(p, g) for p, (*_, g, _) in zip(concept, chunk, strict=True))
-            base_ok += sum(answer_ok(p, g) for p, (*_, g, _) in zip(base, chunk, strict=True))
-            teacher_ok += sum(answer_ok(p, g) for p, (*_, g, _) in zip(rag, chunk, strict=True))
+            if cached is None:
+                base = self._generate_text_batch(
+                    [(eval_system, q) for _, q, _, _ in chunk], max_new
+                )
+                rag = self._generate_text_batch(
+                    [(eval_system, f"{self._facts(sg, aq)}\n\n{q}") for sg, q, _, aq in chunk],
+                    max_new,
+                )
+                base_ok += sum(answer_ok(p, g) for p, (*_, g, _) in zip(base, chunk, strict=True))
+                teacher_ok += sum(answer_ok(p, g) for p, (*_, g, _) in zip(rag, chunk, strict=True))
         self.model.train()
         n = max(1, len(items))
+        base_acc, teacher_acc = cached if cached is not None else (base_ok / n, teacher_ok / n)
+        if cache_brackets and cached is None:
+            self._popqa_brackets[id(items)] = (base_acc, teacher_acc)
         return {
             "concept_acc": concept_ok / n,
-            "base_acc": base_ok / n,
-            "teacher_acc": teacher_ok / n,
+            "base_acc": base_acc,
+            "teacher_acc": teacher_acc,
             "n": len(items),
         }
 
