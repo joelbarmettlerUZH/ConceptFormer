@@ -113,6 +113,8 @@ class TrainConfig:
     # teacher path (no cache) since the teacher target varies per step.
     subsample_neighbors: bool = False
     seed: int = 0
+    # Max grad-norm (0 = off); guards against a rare bad step committing the run to a poor basin.
+    grad_clip: float = 0.0
     # Where the k concept tokens are spliced into the student's user message, relative to the
     # entity mention: "prefix" (message start, the default/baseline), "before_entity",
     # "after_entity", or "replace_entity" (the entity surface form is removed and the concepts
@@ -432,6 +434,8 @@ class ConceptTrainer:
     def _apply(self, loss: Tensor) -> float:
         self.opt.zero_grad()
         loss.backward()
+        if self.cfg.grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.grad_clip)
         self.opt.step()
         if self.sched is not None:
             self.sched.step()

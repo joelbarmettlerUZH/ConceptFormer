@@ -638,6 +638,7 @@ def cf_train(
         str,
         typer.Option(help="concept slot: prefix|before_entity|after_entity|replace_entity"),
     ] = "prefix",
+    grad_clip: Annotated[float, typer.Option(help="max grad-norm (0=off)")] = 0.0,
     metrics_out: Annotated[str, typer.Option(help="write final metrics JSON to this path")] = "",
     wandb: Annotated[bool, typer.Option(help="log to Weights & Biases")] = False,
     wandb_project: Annotated[str, typer.Option()] = "conceptformer-v2",
@@ -694,6 +695,7 @@ def cf_train(
         augment_systems=AUGMENT_SYSTEMS if augment else (),
         subsample_neighbors=subsample,
         placement=placement,
+        grad_clip=grad_clip,
         seed=seed,
     )
     trainer = ConceptTrainer(backbone, cfg)
@@ -710,6 +712,7 @@ def cf_train(
                 "k": k, "d_model": d_model, "n_layers": n_layers, "lr": lr,
                 "temperature": temperature, "steps": steps, "batch": batch,
                 "augment": augment, "subsample": subsample, "placement": placement,
+                "grad_clip": grad_clip, "seed": seed,
                 "dataset": dataset, "snapshot": snapshot,
                 "trainable_params": sum(p.numel() for p in trainer.model.parameters()),
             },
