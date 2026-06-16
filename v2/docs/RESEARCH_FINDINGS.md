@@ -55,7 +55,9 @@ relative-ordering evidence, not absolute ceilings.
 
 ## Finding 1 — Encoder capacity saturates early; bigger is not better
 
-> ✅ **EVIDENCE-BACKED** (sweep `642bhv2c`). Subject to the 24k undertraining caveat above.
+> ⚠️ **DOWNGRADED → within the init-noise floor (see F8).** Single-seed runs; the full spread is
+> only 8 pts ≈ the ~±8-pt init noise, so the "bigger isn't better" ordering is **NOT established**.
+> Needs a multi-seed re-run. Also subject to the 24k undertraining caveat above.
 
 **Claim.** Held-out accuracy is flat-to-declining across encoder size: a ~21M-param encoder matches
 a 70M one and **beats** a 231M one. Capacity is not the bottleneck.
@@ -82,7 +84,9 @@ Sweet spot ≈ **d768, L2–4 (21–40M params)**.
 
 ## Finding 2 — k-curve: an entity's neighborhood compresses into ~4–8 concept tokens
 
-> ✅ **EVIDENCE-BACKED** (sweep `aenmzr4v`). Subject to the 24k undertraining caveat above.
+> ⚠️ **DOWNGRADED → within the init-noise floor (see F8).** k=4→k=8 differs by ~3 pts ≪ the ~±8-pt
+> init noise; the k=1/2 starvation (−6 pts) is more likely real but still single-seed. The knee
+> location is **NOT established** without a multi-seed re-run. Also subject to the 24k caveat above.
 
 **Claim.** Accuracy is starved at k=1–2, jumps at k=4, peaks at k=8, then flat/noisy. The knee at
 **k≈4–8** is the compression headline. KL keeps falling past the knee while accuracy does not (KL ≠
@@ -237,8 +241,12 @@ full-verbalize tokens p50=96, p90=209, p99=476, max=2193; **1/10000** subgraphs 
 
 ## Finding 7 — Prompt augmentation is a GENERALIZATION lever (breaks the ~40% ceiling)
 
-> ✅ **EVIDENCE-BACKED** (run `0ze8ia5q` `augment_on_72k` vs `kuyslwjf`/`sub_off_72k`), controlled
-> cross-prompt robustness harness. This is the biggest single lever found so far.
+> ⛔ **DOWNGRADED → NOT established (within init noise, see F8).** The augment effect **flips sign**
+> across init pairs: old code aug-on−aug-off = +8.5 (`0ze8ia5q` 0.485 − `kuyslwjf` 0.400), new code
+> = −6.5 (`xqui9aio` 0.400 − `uqdcag0a` 0.465). Mean ≈ 0 ± ~7.5. The cross-prompt robustness harness
+> compared two SINGLE checkpoints, so it does not rescue the claim — `0ze8ia5q` may just be a lucky
+> init. **Must be re-tested multi-seed before any augment claim.** Keeping the section below for the
+> measured numbers, but the conclusion is suspended.
 
 **Claim.** Distilling under 5 diverse system prompts (`--augment`) does NOT merely preserve prompt
 robustness (F5) — it **substantially improves generalization** on the SAME 10k corpus, lifting
@@ -272,6 +280,42 @@ vs the same on `sub_off_72k`; compare the 7-prompt mean rows.
 
 ---
 
+## Finding 8 — Training is init-sensitive: a ~±8-pt run-to-run noise floor (THE big caveat)
+
+> ✅ **EVIDENCE-BACKED** (4 "prefix" runs, same `--seed 0` data order, unseeded torch init) — and it
+> is the most important methodological fact in this doc. It downgrades F1, F2, F7.
+
+**Claim.** With identical config + identical data order, runs converge to **different-quality optima
+purely from weight-init differences**: held-out accuracy spans **0.40–0.485 (~8.5 pts)** and held-out
+KL spans **0.647–0.727**. Training is *stable within a run* (smooth monotone eval-KL, last-5 evals
+span ~0.03; per-step train loss is just minibatch noise, no divergence) — the variance is *between*
+runs, in which basin the init lands in.
+
+**Source.** Four prefix runs, all `--seed 0` (so train/val split + batch order identical; only torch
+init differed because it was unseeded until commit `9a1a604`):
+
+| run | config | final KL | final held-out acc |
+|---|---|--:|--:|
+| `kuyslwjf` | aug-off | 0.695 | 0.400 |
+| `uqdcag0a` | aug-off | 0.647 | 0.465 |
+| `0ze8ia5q` | aug-on | 0.687 | 0.485 |
+| `xqui9aio` | aug-on | 0.727 | 0.400 |
+
+**Consequences.**
+- **Any effect ≲ ~8 pts measured from single runs is unproven** (kills F1, F2, F7 as stated).
+- Survivors: F3 (null subsample), F4 (undertraining, +28 pts ≫ noise), F6 (data property).
+- Fixed forward: torch is now seeded (`9a1a604`) → same seed reproduces. **All comparisons must run
+  ≥3 seeds and report mean±std**, and effects must clear the noise band to be claimed.
+
+**Suspected cause (hypothesis, not yet tested).** The zero-init `tanh` gate is a single high-LR
+(`gate_lr=1e-2`) bottleneck modulating the *entire* concept contribution; depending on the encoder
+init, it opens into a better/worse regime early and the run commits to that basin. Mitigations to
+probe: gate warmup / lower gate-LR, different encoder init, weight averaging (EMA/SWA), more steps.
+
+**Re-verify:** re-run any config ×3 seeds with the fix; the across-seed std IS the noise floor.
+
+---
+
 ## Methods notes (provenance / things that affect comparability)
 
 - **M1 — Eval brackets.** `base` = frozen Qwen, no knowledge; `teacher(RAG)` = frozen Qwen reading
@@ -290,11 +334,15 @@ vs the same on `sub_off_72k`; compare the 7-prompt mean rows.
 
 ## Open questions (not yet evidence-backed — do NOT state as findings)
 
+0. **TOP PRIORITY — establish the noise floor + re-test downgraded findings multi-seed (F8).** Run
+   key configs ×3 seeds (now that torch is seeded) to get mean±std, then re-decide F1 (capacity),
+   F2 (k), F7 (augment), and the placement ablation against the noise band. Also probe whether the
+   init sensitivity can be *reduced* (gate warmup / lower gate-LR / EMA) so fewer seeds are needed.
 1. Do the capacity/k orderings hold at convergence (cached, ~60k+ steps)? (sweeps were 24k, undertrained)
 2. ~~Does `sub_on` match `sub_off` on robustness?~~ **RESOLVED → F3/F5**: yes (slightly worse);
    subsample question fully closed.
-3. ~~Does `--augment` improve robustness?~~ **RESOLVED → F7**: yes, and far more — it's a
-   generalization lever (+7.7 held-out, +4.7 popqa). Best model should run augment ON.
+3. ~~Does `--augment` help?~~ **RE-OPENED → F8**: the +7.7 in F7 flips to −6.5 on another init, so
+   augment's effect is unproven (within noise). Must be re-tested ×3 seeds before any claim.
 3b. ⛔ NOT YET EVIDENCE-BACKED — **Concept-vector placement.** Does *where* the k concept tokens sit
    in the user message matter? Modes: `prefix` (current baseline), `before_entity`, `after_entity`,
    `replace_entity` (entity surface form removed → concepts must fully substitute). Entity is
