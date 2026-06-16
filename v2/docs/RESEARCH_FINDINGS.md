@@ -47,6 +47,10 @@ The capacity and k sweeps were run at **24,000 steps with `--subsample`**, which
 findings 1–2 are below convergence, and the *relative* orderings (what saturates) are the reliable
 takeaway, not the ceilings. Re-running either sweep cached + longer is the open follow-up.
 
+They were also run **augment-off**. F7 shows augmentation is a large generalization lever, so the
+capacity/k saturation points may shift with augment on — another reason to treat findings 1–2 as
+relative-ordering evidence, not absolute ceilings.
+
 ---
 
 ## Finding 1 — Encoder capacity saturates early; bigger is not better
@@ -206,8 +210,8 @@ yet held-out moves only a few points). Subsampling does **not** improve robustne
 **worse** (2× the held-out std, lower worst-case), reinforcing F3. Reproduce for `sub_on` by swapping
 `--checkpoint sub_on_72k` into the command above (auto-pulls `model:sub_on_72k`).
 
-> 🟡 Still open: whether `--augment` (multi-prompt distillation) lowers the std *below* this already
-> ~1–3% baseline. Not yet run; see open question 3.
+> ✅ **RESOLVED → F7:** `--augment` was run. It keeps robustness (std 1.6%) AND raises accuracy a lot
+> (+7.7 held-out, +4.7 popqa). Augmentation's value is generalization, not just lower variance.
 
 ---
 
@@ -228,6 +232,43 @@ full-verbalize tokens p50=96, p90=209, p99=476, max=2193; **1/10000** subgraphs 
 **Re-verify:** re-run the distribution/answer-edge check against the snapshot (sha above) and
 `qa_distill.jsonl`; both verbalizers are in `src/conceptformer/verbalize.py`
 (`verbalize_budgeted`, `verbalize_with_answer`).
+
+---
+
+## Finding 7 — Prompt augmentation is a GENERALIZATION lever (breaks the ~40% ceiling)
+
+> ✅ **EVIDENCE-BACKED** (run `0ze8ia5q` `augment_on_72k` vs `kuyslwjf`/`sub_off_72k`), controlled
+> cross-prompt robustness harness. This is the biggest single lever found so far.
+
+**Claim.** Distilling under 5 diverse system prompts (`--augment`) does NOT merely preserve prompt
+robustness (F5) — it **substantially improves generalization** on the SAME 10k corpus, lifting
+held-out and unseen-entity accuracy well past the ~40% that capacity/k/length all saturated at.
+
+**Source.** `model:augment_on_72k` (run `0ze8ia5q`, group `augment-ablation`) vs `model:sub_off_72k`
+(`kuyslwjf`). Both k=8, d1024/L4, 72k cached steps, same corpus; only `--augment` differs. Numbers
+from the identical `eval-prompt-robustness` harness (same held-out questions + PopQA sample, mean over
+7 system prompts):
+
+| metric (7-prompt mean / std / min) | sub_off (no augment) | augment_on | Δ mean |
+|---|--:|--:|--:|
+| held_out concept_acc | 39.1% / 1.2% / 37.0% | **46.8%** / 1.6% / 43.5% | **+7.7** |
+| popqa concept_acc (unseen entities) | 17.1% / 0.6% / 16.5% | **21.8%** / 0.5% / 21.0% | **+4.7** |
+
+Augment stays prompt-robust (std 1.6%; its *worst* prompt 43.5% beats sub_off's *best* 40.0%). The
+augment run's own end-of-training samples read higher still (held_out 48.5%, popqa 27.5%, held_in
+53.5% — run `0ze8ia5q` summary) but on a different sample, so the controlled cross-prompt numbers
+above are the figures to cite.
+
+**Interpretation.** Multi-prompt distillation forces the concept vectors to encode prompt-invariant
+entity knowledge rather than prompt-specific shortcuts — a strong regularizer that also multiplies
+the effective training signal (5 views/example). The earlier "~40% ceiling → need more data" read
+(F4) was therefore premature: augmentation breaks it to ~47% with **no extra data**.
+
+**Knock-on caveat:** F1 (capacity) and F2 (k) were measured **augment-off**; their saturation points
+may shift with augmentation on. Re-checking the best config with augment is an open follow-up.
+
+**Re-verify:** `eval-prompt-robustness --checkpoint augment_on_72k …` (auto-pulls `model:augment_on_72k`)
+vs the same on `sub_off_72k`; compare the 7-prompt mean rows.
 
 ---
 
@@ -252,7 +293,13 @@ full-verbalize tokens p50=96, p90=209, p99=476, max=2193; **1/10000** subgraphs 
 1. Do the capacity/k orderings hold at convergence (cached, ~60k+ steps)? (sweeps were 24k, undertrained)
 2. ~~Does `sub_on` match `sub_off` on robustness?~~ **RESOLVED → F3/F5**: yes (slightly worse);
    subsample question fully closed.
-3. Does `--augment` improve prompt robustness beyond the already ~1–3% std baseline?
+3. ~~Does `--augment` improve robustness?~~ **RESOLVED → F7**: yes, and far more — it's a
+   generalization lever (+7.7 held-out, +4.7 popqa). Best model should run augment ON.
+3b. ⛔ NOT YET EVIDENCE-BACKED — **Concept-vector placement.** Does *where* the k concept tokens sit
+   in the user message matter? Modes: `prefix` (current baseline), `before_entity`, `after_entity`,
+   `replace_entity` (entity surface form removed → concepts must fully substitute). Entity is
+   verbatim in 100% of questions, so all modes run on the full corpus. Needs a `placement` config +
+   per-example student head. Hypothesis: adjacency/replacement improves entity↔knowledge binding.
 4. Does 10×-wider data (100k entities) lift the ~40% held-out / 18% PopQA ceiling? ⛔ NOT YET
    EVIDENCE-BACKED. Snapshot **built and staged** — `data/snapshots/cftrain_100k`, 100,000 usable
    subgraphs (261,475 candidates, 38% pass), sha256 `ee4850f5633d8aa2a374bb9e145ce10675870274e7b25ca5bf0c5f545e60242c`.
