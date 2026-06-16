@@ -23,12 +23,13 @@ Goal is OUTCOME stability (low across-run spread), NOT bit-reproducibility.
       d1024/L4, 36k, seeded. Three reads: (a) same-seed final gap s0 vs s0repro [is the variance
       INIT or CUDA?], (b) across-seed std s0/s1/s2 [the noise floor], (c) batch64 vs baseline.
       Watcher buux4huod reports the same-seed full-trajectory comparison when the pair converges.
-- [ ] **2.2 Nail down the cause + record (update F8).** From round 1, conclude init vs CUDA vs
-      general sensitivity; write the measured noise floor + reproducibility verdict into
-      RESEARCH_FINDINGS.md F8; decide the round-2 strategy.
-- [ ] **2.2b CONDITIONAL — full-determinism fallback.** ONLY if 2.1(a) shows CUDA nondeterminism
-      drives large outcome divergence: try `torch.use_deterministic_algorithms(True)` +
-      `CUBLAS_WORKSPACE_CONFIG`; note the speed cost / unsupported-op risk. Skip if init-dominated.
+- [ ] **2.2 Gauge sensitivity + record (update F8).** From round 1, write the noise floor + the
+      same-seed outcome gap into RESEARCH_FINDINGS.md F8. Interpretation: the same-seed gap is a
+      **sensitivity gauge** — if runs that differ ONLY by CUDA fp-noise still diverge in outcome, the
+      training is pathologically sensitive and the stabilization bar is higher. We do NOT force
+      determinism (use_deterministic_algorithms / CUBLAS_WORKSPACE_CONFIG) — that masks the symptom.
+      The fix is always on OUR end (training strategy / architecture robustness); cause-attribution
+      (init vs CUDA) only sets how hard round 2 must push.
 - [ ] **2.3 Round 2 — stabilization arms (test several, pick winner).** Three arms, each ×3 seeds,
       keep whichever MINIMIZES across-seed std while holding accuracy; combine winners. Levers ready
       & committed (39c27e5):
