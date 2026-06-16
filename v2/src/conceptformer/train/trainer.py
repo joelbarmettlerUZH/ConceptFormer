@@ -165,6 +165,13 @@ class ConceptTrainer:
     def __init__(self, backbone: Backbone, config: TrainConfig) -> None:
         self.bb = backbone
         self.cfg = config
+        # Seed torch BEFORE building the encoder: its weight init draws from torch's global RNG, so
+        # without this every run starts from a different random init -> different optimum -> large
+        # run-to-run variance that swamps the effects we measure. (Python's `random`, seeded below,
+        # only controlled data order, not weight init / dropout.) CUDA matmul atomics remain a small
+        # residual nondeterminism source; this removes the dominant one.
+        torch.manual_seed(config.seed)
+        torch.cuda.manual_seed_all(config.seed)
         d_in = 2 * backbone.d_model  # concat(property, neighbor) edge features
         self.model = ConceptFormer(
             d_in,
