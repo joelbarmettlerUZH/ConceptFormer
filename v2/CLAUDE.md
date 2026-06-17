@@ -5,6 +5,25 @@ Dense, code-free orientation. **Companions:** `TODO.md` (live plan), `docs/RESEA
 `docs/CONCEPTFORMER_V2_EXPLAINED.md` (the design rationale for a PhD reader). This file holds the
 *why*, the *learnings*, the *pitfalls*, and *how to run* — not anything the code already states.
 
+## Working discipline (read every session)
+- **This ships as a paper; the code is open-source.** Hold everything to publication quality:
+  reproducible, readable, tested, honest. Reviewers and readers will run this.
+- **Evidence vs hypothesis — be ruthless.** Something is a *finding* only when shown **empirically**
+  by a controlled experiment that clears the noise floor (≥3 seeds, mean±std). Until then it is a
+  **hypothesis to be proven** — say so, and never let it enter the paper as a result. Tag every claim
+  in `docs/RESEARCH_FINDINGS.md` (✅ evidence-backed / 🟡 partial / ⛔ not yet). One run is not
+  evidence (see F8). When unsure, design the experiment that could *falsify* the claim.
+- **W&B is the single source of truth for numbers.** Every metric you cite must be traceable to a
+  **run-id** (or sweep/artifact) and **re-verified at source** before it goes in a doc or the paper —
+  numbers drift, memory lies. Every checkpoint/result must be a **downloadable W&B artifact**
+  (`model:<name>`); if a result isn't reproducible from W&B, it doesn't count.
+- **Research before you design.** Before any architecture/training decision, check the literature
+  with the **`hf` CLI papers** tools; record the **arXiv id in a code comment** at the site of the
+  choice (e.g. why a resampler, why this gate, why these positions). Decisions cite prior art.
+- **Keep the docs in sync — constant, deliberate effort.** *After each run or change*, explicitly ask
+  whether `CLAUDE.md`, `TODO.md`, `docs/RESEARCH_FINDINGS.md`, or `docs/*` need updating, and do it.
+  These four drift the moment you stop tending them; an out-of-sync doc is worse than none.
+
 ## What this is
 Knowledge injection for a **frozen** LLM. For a Wikidata entity, encode its **1-hop neighborhood**
 into `k` constant **soft "concept tokens"** and splice them into the LLM's prompt in place of
@@ -134,6 +153,24 @@ baseline noise floor ≈1.5 pt std @36k — but it **grows with horizon**, so 36
 convergence spread; round-2 arms = EMA / gate-none / gradient-clip / larger-batch, pick the lowest-
 spread winner, then validate at 72k). Then re-run capacity→k-curve(at best capacity)→augment→
 placement with the stabilizer; assemble best-model recipe; decide the 100k-entity scale-up.
+
+## Coding guidelines (publication-grade open source)
+- **Gate is non-negotiable:** `ruff check`, `ty check`, and `pytest -q -m "not integration"` all
+  green before any commit. Line length **100**; **ASCII only** in source (ruff RUF flags en-dash, ×,
+  ≈, etc.). The ruff rule set (E/W/F/I/UP/B/SIM/RUF/ANN/RET/C4/PTH) is in `pyproject.toml` — respect
+  it rather than widening ignores.
+- **Type everything.** Full annotations; `ty` clean (no silencing). Narrow `X | None` explicitly
+  (raise on `None`) rather than blanket asserts. CLI options/args use **typer `Annotated[...]`** with
+  a `help=` string. Prefer `Sequence`/protocols over concrete containers at boundaries.
+- **Comments explain WHY, never WHAT.** The code already says what it does; a comment earns its place
+  only by giving the rationale, the trade-off, the gotcha, or the prior-art (arXiv id). No narration.
+  Match the surrounding file's comment density and idiom — write code that reads like its neighbours.
+- **Docs contain no code** (they drift); reference files/symbols instead. Keep functions small and
+  **extract pure helpers** so logic is unit-testable without the GPU/model (e.g. `place_concept_slot`,
+  the verbalizers, `gate_mode` invariants are tested this way). Add a test with every behavior change.
+- **Determinism of *intent*:** seed what you can, but the goal is robust training (low across-run
+  spread), not papering over chaos with `use_deterministic_algorithms` — fix sensitivity in the
+  model/training, not by pinning the hardware (see F8).
 
 ## Pitfalls (hard-won; do not relearn)
 - **Don't trust a single run** for any effect ≲8 pt — it's inside the noise floor (F8). Multi-seed.
