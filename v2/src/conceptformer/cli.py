@@ -639,6 +639,9 @@ def cf_train(
         typer.Option(help="concept slot: prefix|before_entity|after_entity|replace_entity"),
     ] = "prefix",
     grad_clip: Annotated[float, typer.Option(help="max grad-norm (0=off)")] = 0.0,
+    grad_accum: Annotated[
+        int, typer.Option(help="micro-batches/step (effective batch = batch*grad_accum)")
+    ] = 1,
     ema_decay: Annotated[float, typer.Option(help="EMA decay for eval/ckpt weights (0=off)")] = 0.0,
     gate_mode: Annotated[str, typer.Option(help="concept gate: tanh|none")] = "tanh",
     metrics_out: Annotated[str, typer.Option(help="write final metrics JSON to this path")] = "",
@@ -662,6 +665,7 @@ def cf_train(
         TEACHER_SYSTEM,
         ConceptTrainer,
         TrainConfig,
+        split_microbatches,
     )
 
     qa_dir = settings.data_root / "cf_train" / dataset
@@ -698,6 +702,7 @@ def cf_train(
         subsample_neighbors=subsample,
         placement=placement,
         grad_clip=grad_clip,
+        grad_accum=grad_accum,
         ema_decay=ema_decay,
         gate_mode=gate_mode,
         seed=seed,
@@ -718,7 +723,9 @@ def cf_train(
                 "steps": steps, "batch": batch, "warmup_steps": cfg.warmup_steps,
                 "rag_context_tokens": cfg.rag_context_tokens, "val_frac": val_frac,
                 "eval_n": eval_n, "augment": augment, "subsample": subsample,
-                "placement": placement, "grad_clip": grad_clip, "ema_decay": ema_decay,
+                "placement": placement, "grad_clip": grad_clip, "grad_accum": grad_accum,
+                "effective_batch": batch * grad_accum,
+                "ema_decay": ema_decay,
                 "gate_mode": gate_mode, "seed": seed, "model": model,
                 "dataset": dataset, "snapshot": snapshot,
                 "n_train": len(train_tuples), "n_val": len(val_rows),
@@ -817,18 +824,23 @@ def cf_train(
             wb.log(log, step=step)
         return m
 
+    accum = max(1, grad_accum)
     if subsample:
         rprint("[dim]subsample mode: features cached, teacher facts re-sampled each step…[/dim]")
         train_pool: list = train_tuples  # raw 4-tuples; teacher rebuilt live per step
         step_fn = trainer.step
+        accum_fn = trainer.step_accum
     else:
         rprint("[dim]preprocessing (featurize + tokenize once)…[/dim]")
         train_pool = trainer.prepare(train_tuples)  # hoists CPU work out of the training loop
         step_fn = trainer.step_prepared
+        accum_fn = trainer.step_prepared_accum
+    eff_batch = batch * accum  # sample the whole effective batch, then split into `accum` micros
     trainer.setup_eval(eval_val, sg_by_qid, eval_system=eval_system)  # brackets computed once
     report("init", 0)
     for s in range(1, steps + 1):
-        loss = step_fn(rng.sample(train_pool, min(batch, len(train_pool))))
+        sample = rng.sample(train_pool, min(eff_batch, len(train_pool)))
+        loss = accum_fn(split_microbatches(sample, accum)) if accum > 1 else step_fn(sample)
         if wb and s % 25 == 0:
             step_log = {
                 "train/loss": loss,

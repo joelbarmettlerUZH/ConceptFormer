@@ -111,7 +111,9 @@ integrity `sha256`.
   independent experiments by pinning `CUDA_VISIBLE_DEVICES=N` **and passing `--device cuda:0`**
   (CVD remaps the visible card to ordinal 0 — passing `--device cuda:N` is the classic bug → "invalid
   device ordinal"). Always set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`. **`batch 64`
-  OOMs**; `batch 32` fits. Larger *effective* batch ⇒ gradient accumulation (not yet implemented).
+  OOMs**; `batch 32` fits. Larger *effective* batch ⇒ **`--grad-accum N`** (effective = `batch*N`,
+  peak memory stays at one batch; LR left unscaled so batch size is a clean lever). Effective batch
+  **32 is the sweet spot** at 72k (eff64 overshoots — see F8); the locked base uses `batch16 x accum2`.
 - **W&B:** entity `university-of-zurich`, project `conceptformer-v2` (auth via `~/.netrc`). `cf-train`
   auto-logs full trajectories + a **`model:<checkpoint>` artifact**. Read runs by **run-id or
   `state="finished"`**, never by name alone (killed runs leave same-named `crashed`/`failed` ghosts).
@@ -134,25 +136,27 @@ itself is *not* yet a W&B artifact — reproduce from the snapshot sha if needed
 `Co-Authored-By: Claude Opus 4.8 (1M context)`. `memory/` is intentionally **not** committed.
 
 ## State of knowledge (summary — details + run-ids in `docs/RESEARCH_FINDINGS.md`)
-**The dominant open problem (F8):** large run-to-run **outcome** variance (~8 pt held-out at 72k for
-"identical" configs). Cause is a *hypothesis under test* (init vs CUDA fp-nondeterminism vs general
-sensitivity), **not** a proven diagnosis. Seeding torch (done) makes *init* reproducible but **same-
-seed runs still diverge** — so it's sensitivity-driven, and **we fix it in training/architecture, not
-by forcing CUDA determinism** (that would mask the symptom). Goal is **outcome stability** (low
-across-run spread so parameters are *steerable*), not bit-reproducibility. Consequence: every
-sub-~8-pt single-run result is untrustworthy — **F1 (capacity saturates), F2 (k-knee≈4–8), F7
-(augment +7.7) are DOWNGRADED** pending multi-seed re-runs. What survives: **F3** (neighbor-subsample
-= no benefit, ~2× slower → use cached teacher), **F4** (24k is *undertrained*; converges ~40% held-
-out by ~54–72k then overfits, held_in≈51%), **F6** (at the 2048-tok budget the answer edge is
-essentially always present; subsample ≈ no-op). Gate behavior: gates open *gradually*, saturate
-(`tanh→±1`, zero-gradient) ~36k, and lock a *different* per-token sign config each run.
+**F8 (run-to-run variance) — LARGELY RESOLVED, config LOCKED.** The original problem: ~8-pt held-out
+outcome variance at 72k for "identical" configs, making effects un-steerable. Seeding torch made
+*init* reproducible but same-seed runs still diverged → sensitivity-driven, **fixed in
+training/architecture, not by forcing CUDA determinism**. The fix that emerged from a controlled
+search (round-2 arms EMA/gate-none/grad-clip/batch, then a 72k batch-size curve): **gate-none**
+(drop the saturating tanh gate, zero-init the encoder out-proj instead) **+ effective batch 32 via
+`--grad-accum 2`**. Measured @72k, ×3 seeds: **held-out 0.535, std 1.08 pt, range 2.5 pt** — the
+tightest of every config, and highest accuracy. Curve is **non-monotone: eff32 is the sweet spot,
+eff64 overshoots** (mean drops, spread widens). EMA *hurt*; batch alone (true b32) was accurate but
+unstable (std 3.06). This is the **locked Phase-3 base** (`p25_eff32_*`, group `phase25-grad-accum`).
+Caveat: n=3 throughout. The downgrades stand until re-tested: **F1 (capacity saturates), F2
+(k-knee≈4–8), F7 (augment +7.7)** were single-seed, inside the old noise — Phase 3 re-runs them on
+the locked base with error bars. What survives independently: **F3** (neighbor-subsample = no
+benefit, ~2× slower → cached teacher), **F4** (24k is *undertrained*; converges ~40%+ held-out by
+~54–72k then overfits), **F6** (at the 2048-tok budget the answer edge is ~always present).
 
-**Established protocol going forward:** subsample **off** (cached), **≥3 seeds, report mean±std**,
-claim an effect only if it clears the measured noise band. Current phase: stabilize training (round-1
-baseline noise floor ≈1.5 pt std @36k — but it **grows with horizon**, so 36k underestimates
-convergence spread; round-2 arms = EMA / gate-none / gradient-clip / larger-batch, pick the lowest-
-spread winner, then validate at 72k). Then re-run capacity→k-curve(at best capacity)→augment→
-placement with the stabilizer; assemble best-model recipe; decide the 100k-entity scale-up.
+**Established protocol going forward:** subsample **off** (cached), gate-none + grad-accum2 base,
+**≥3 seeds, report mean±std**, claim an effect only if it clears the ~1-pt floor. Current phase
+(Phase 3): re-run capacity (3.1, running) → k-curve at best capacity (3.2) → augment (3.3) →
+placement (3.4) on the locked base; update findings with error bars (3.5); assemble best-model
+recipe (4.1); decide the 100k-entity scale-up (4.2). Live plan + status in `TODO.md`.
 
 ## Coding guidelines (publication-grade open source)
 - **Gate is non-negotiable:** `ruff check`, `ty check`, and `pytest -q -m "not integration"` all

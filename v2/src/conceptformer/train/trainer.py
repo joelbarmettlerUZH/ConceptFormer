@@ -18,9 +18,10 @@ from __future__ import annotations
 import contextlib
 import math
 import random
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import torch
 from torch import Tensor
@@ -61,6 +62,16 @@ HELD_OUT_EVAL_SYSTEM = "You are a precise question-answering system. State the a
 
 def _chunks(seq: list, size: int) -> list[list]:
     return [seq[i : i + size] for i in range(0, len(seq), size)]
+
+
+def split_microbatches(items: list, n: int) -> list[list]:
+    """Split ``items`` into ``n`` micro-batches for gradient accumulation.
+
+    Strided (``items[i::n]``) rather than contiguous so the groups stay balanced in size even when
+    ``len(items)`` is not a multiple of ``n`` -- balanced micro-batches keep the 1/n loss scaling in
+    ``ConceptTrainer._apply_accum`` close to a true large-batch gradient.
+    """
+    return [items[i::n] for i in range(n)]
 
 
 def place_concept_slot(question: str, entity_label: str | None, placement: str) -> str:
@@ -117,6 +128,13 @@ class TrainConfig:
     seed: int = 0
     # Max grad-norm (0 = off); guards against a rare bad step committing the run to a poor basin.
     grad_clip: float = 0.0
+    # Gradient accumulation: split each optimizer step over this many micro-batches so the EFFECTIVE
+    # batch is batch*grad_accum without the memory of a true large batch (batch 64 OOMs on 24 GB).
+    # Larger effective batch was the strongest accuracy lever at 72k and it grows with horizon (F8);
+    # this reaches batch sizes a single forward can't hold. LR is left UNSCALED (the batch16->32 win
+    # used the same LR), keeping batch size a clean separate lever. arXiv:1711.00489 (raise the
+    # batch instead of decaying the LR), arXiv:1609.04836 (large-batch generalization gap).
+    grad_accum: int = 1
     # Exponential moving average of the trainable weights (0 = off). Eval + the saved checkpoint use
     # the EMA weights, so the final result depends far less on exactly where the last step landed --
     # a direct lever for OUTCOME stability across near-identical runs.
@@ -453,9 +471,8 @@ class ConceptTrainer:
             loss = loss + self.cfg.ce_weight * sequence_cross_entropy(student_g, targets, mask_m)
         return loss
 
-    def _apply(self, loss: Tensor) -> float:
-        self.opt.zero_grad()
-        loss.backward()
+    def _optimizer_step(self) -> None:
+        """Clip (recording pre-clip norm), step, schedule, EMA — shared by single + accumulated."""
         # Always record the pre-clip total grad-norm (a key instability signal); clip if enabled.
         clip = self.cfg.grad_clip if self.cfg.grad_clip > 0 else float("inf")
         self.last_grad_norm = float(torch.nn.utils.clip_grad_norm_(self.model.parameters(), clip))
@@ -468,7 +485,34 @@ class ConceptTrainer:
                 for n, p in self.model.named_parameters():
                     if n in self._ema:
                         self._ema[n].mul_(d).add_(p.detach(), alpha=1.0 - d)
+
+    def _apply(self, loss: Tensor) -> float:
+        self.opt.zero_grad()
+        loss.backward()
+        self._optimizer_step()
         return float(loss.detach())
+
+    def _apply_accum(
+        self, loss_fn: Callable[[list[Any]], Tensor], micro_batches: list[list[Any]]
+    ) -> float:
+        """One optimizer step accumulated over several micro-batches (effective batch = their sum).
+
+        Each micro loss is scaled by 1/n and the grads summed. Because ``sequence_kl`` averages over
+        supervised *tokens* (not examples), this equals a true large-batch gradient only when the
+        micro-batches carry equal token counts; with variable path lengths it is the standard
+        accumulation approximation (each micro-batch weighted equally, not by token count) -- the
+        same trade-off every framework's grad-accum makes. Losses are computed and freed one
+        micro-batch at a time, so peak memory stays at one batch (batch 64 OOMs as one forward).
+        """
+        self.opt.zero_grad()
+        n = len(micro_batches)
+        total = 0.0
+        for mb in micro_batches:
+            loss = loss_fn(mb) / n
+            loss.backward()
+            total += float(loss.detach())
+        self._optimizer_step()
+        return total
 
     @contextlib.contextmanager
     def _eval_weights(self) -> Iterator[None]:
@@ -496,6 +540,16 @@ class ConceptTrainer:
     def step_prepared(self, batch: list[Prepared]) -> float:
         """One optimizer step from cached ``Prepared`` rows (GPU-bound)."""
         return self._apply(self.batch_loss_cached(batch))
+
+    def step_accum(
+        self, micro_batches: list[list[tuple[Subgraph, str, list[int], str | None]]]
+    ) -> float:
+        """Accumulated step from raw 4-tuple micro-batches (live teacher; subsample path)."""
+        return self._apply_accum(self.batch_loss, micro_batches)
+
+    def step_prepared_accum(self, micro_batches: list[list[Prepared]]) -> float:
+        """Accumulated step from cached ``Prepared`` micro-batches (the cached-teacher path)."""
+        return self._apply_accum(self.batch_loss_cached, micro_batches)
 
     def _left_pad_embeds(self, seqs: list[Tensor]) -> tuple[Tensor, Tensor]:
         """Left-pad ``(L_i, d)`` embeds for batched generation (real content right-aligned)."""

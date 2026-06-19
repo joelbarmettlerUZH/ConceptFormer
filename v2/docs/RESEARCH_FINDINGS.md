@@ -323,6 +323,100 @@ probe: gate warmup / lower gate-LR, different encoder init, weight averaging (EM
 
 **Re-verify:** re-run any config ×3 seeds with the fix; the across-seed std IS the noise floor.
 
+**MEASURED — noise floor @36k (round 1, seeded, group `variance-study`).** With torch now seeded, a
+clean ×3-seed baseline (k8/d1024/L4, aug-off, prefix, batch16, 36k) gives held-out **mean 0.330, std
+1.54 pt, range 3.50 pt, KL range 0.144** (`ifmqlpqw`/`3337ngsr`/`n7s8r4lh`, + s0repro `jz9ktk2n`).
+Same-seed s0 vs s0repro differ **2.50 pt** — i.e. ≈ the across-seed range. So seeding the init does
+NOT collapse the spread: residual nondeterminism (CUDA/data-loader ordering) alone moves the outcome
+as much as changing the seed. This **supports the sensitivity framing over the init-only hypothesis**
+— whatever the perturbation, the training maps it to a meaningfully different basin. (Note the @36k
+floor here, ~1.5 pt std, is smaller than the ~8.5-pt @72k spread in the table above; consistent with
+the earlier observation that variance grows with horizon. The downgrades of F1/F2/F7 stand.)
+
+**MEASURED — stabilization arms @36k (round 2, group `round2-stabilization`).** Each arm ×3 seeds vs
+the baseline floor (std 1.54 pt). Lower std/range = more stable; mean must not drop.
+
+| arm | mean held-out | std | range | KL range | run-ids |
+|---|--:|--:|--:|--:|---|
+| baseline (tanh gate, b16) | 0.330 | 1.54 | 3.50 | 0.144 | `ifmqlpqw` `3337ngsr` `n7s8r4lh` `jz9ktk2n` |
+| **gate-none** (drop tanh gate) | 0.333 | **1.03** | **2.50** | 0.102 | `r2_gatenone_s0/1/2` |
+| grad-clip 1.0 | 0.352 | 2.72 | 6.00 | 0.093 | `r2_gradclip_s0/1/2` |
+| EMA 0.999 | 0.313 | 2.49 | 6.00 | 0.145 | `r2_ema_s0/1/2` |
+| batch32 | 0.390 | 4.14 | 10.00 | 0.063 | `j7rsy7c6` `05uxwbjv` `vnj598by` |
+
+**Read (CANDIDATE, not yet a finding — n=3).** `gate-none` is the only arm that tightened all three
+spread measures *without* costing accuracy (std 1.54→1.03, range 3.50→2.50, KL range 0.144→0.102, mean
+0.330→0.333). This is mechanistically consistent with F8's prime suspect: removing the single high-LR
+`tanh` gate (replaced by a zero-init encoder `out_proj`) removes the early basin-commitment lever.
+Counter-results worth recording: **EMA made it worse** (std 2.49, mean 0.313) — refutes the
+weight-averaging mitigation for this setup; **batch32 is an accuracy lever, not a stability one**
+(+6.0 pt mean but std 4.14, range 10 pt — and leaning on one high-flyer seed `05uxwbjv`=0.445).
+**Caveat:** at n=3 the gate-none↔baseline std gap (1.03 vs 1.54) is within what 3 seeds can fluke;
+this is the most promising candidate to VALIDATE at 72k (task 2.4), not a proven stabilizer.
+Open follow-up: **gate-none + batch32** — does dropping the gate tame batch32's spread while keeping
+its accuracy gain?
+
+**MEASURED — 72k validation (task 2.4, group `phase24-72k-validation`).** The stabilizer must hold at
+the long horizon, where the original ~8.5-pt spread was observed. Each arm ×3 seeds, k8/d1024/L4,
+aug-off, prefix, gate-none, 72k.
+
+| arm | mean held-out | std | range | KL range | run-ids |
+|---|--:|--:|--:|--:|---|
+| gate-none (b16) | 0.412 | 2.05 | 5.00 | 0.183 | `ctajbg7p` `gbammsfm` `bj7psrba` |
+| gate-none + batch32 | **0.517** | 3.06 | 7.50 | 0.121 | `feloox12` `f8odlni6` `6uc00v7p` |
+
+**Read — two results, one tension.**
+1. **gate-none stabilizes at 72k (validates the candidate).** Its across-seed range is **5.0 pt** vs
+   the original uncontrolled ~8.5-pt @72k spread, std 2.05 pt. Caveat: the cleanest head-to-head
+   (seeded *tanh*-gate ×3 @72k) was not run, so "gate-none < tanh @72k" rests on the @36k controlled
+   gap (1.03 vs 1.54) plus this being tighter than the old uncontrolled spread — strong but not
+   airtight. Note the spread does grow 36k→72k (std 1.03→2.05) — variance-grows-with-horizon holds
+   even with the gate removed.
+2. **batch32 is a large accuracy lever that GROWS with horizon (new, important).** gate-none+batch32
+   reaches **0.517** held-out, +10.5 pt over gate-none b16 (0.412) at the same 72k — the only
+   difference is batch16→32. The gain compounds vs the +6 pt seen @36k (less gradient noise → longer
+   productive training). Decisively, the combo's **worst** seed (0.480) beats gate-none's **best**
+   (0.435), so the accuracy win is not a spread artifact. Cost: wider spread (std 3.06, range 7.5) —
+   batch32 trades some stability for a lot of accuracy, consistent with its @36k behavior.
+
+**Tension to resolve at lock-time (task 2.5).** Stability (gate-none b16: std 2.05, acc 0.412) vs
+accuracy (gate-none+batch32: std 3.06, acc 0.517). The combo's range (7.5 pt) is only modestly below
+the original problem (~8.5 pt), so it is *not yet* the "steerable" config Phase 2 set out to find —
+but its accuracy is far higher. Open levers to get *both*: gradient accumulation (even larger
+effective batch without OOM), or gate-none+batch32+grad-clip. **Caveat throughout: n=3.**
+
+**MEASURED — batch-size curve @72k via gradient accumulation (task 2.5, group `phase25-grad-accum`).**
+All gate-none, aug-off, prefix, k8/d1024/L4, ×3 seeds. Effective batch = `batch * grad_accum`;
+accumulation reaches batches a single forward can't hold (true batch 64 OOMs on 24 GB).
+
+| effective batch | how | mean held-out | std | range | run-ids |
+|---|---|--:|--:|--:|---|
+| 16 | b16 | 0.412 | 2.05 | 5.00 | `ctajbg7p` `gbammsfm` `bj7psrba` |
+| 32 | true b32 | 0.517 | 3.06 | 7.50 | `feloox12` `f8odlni6` `6uc00v7p` |
+| **32** | **b16 x accum2** | **0.535** | **1.08** | **2.50** | `pioias3s` `b77d9lro` `74i8ub54` |
+| 64 | b16 x accum4 | 0.497 | 2.66 | 6.50 | `bv8lfaqe` `ivpk2rk3` `orhvqlc6` |
+
+**Read — effective batch 32 is the sweet spot, and accumulation gives BOTH accuracy and stability.**
+- **eff32-accum wins on both axes:** highest mean (0.535, +12 pt over eff16's 0.412) AND the tightest
+  spread of every config measured in F8 (std 1.08, range 2.50) — finally below the original ~8.5-pt
+  problem. This is the steerable config Phase 2 set out to find.
+- **The curve is non-monotone — 64 overshoots.** eff64 mean *drops* to 0.497 (below eff32) and spread
+  widens (2.66). So bigger-is-better stops by 32; there is an optimum, not a ramp. (n=3 caveat, but
+  the eff32↔eff64 mean gap, 0.535 vs 0.497, exceeds their combined spread.)
+- **accum32 tighter than true-batch32 (0.535±1.08 vs 0.517±3.06) — interpret cautiously.** Same
+  effective batch, similar accuracy; the accum runs were tighter, but part of true-b32's 3.06 std is
+  one high-flyer seed (`feloox12`=0.555), so the std *gap* is not fully trustworthy at n=3. The safe
+  claim is "accum reproduces true-batch accuracy at effective-32" (control passes), not "accum is
+  inherently more stable than a true batch."
+
+**Conclusion (task 2.5 — LOCKED 2026-06-19).** The stabilized Phase-3 base config is **gate-none +
+effective batch 32 via grad-accum** (`--batch 16 --grad-accum 2 --gate-mode none`, 72k, k8,
+d1024/L4, cached teacher): best mean (0.535) and tightest spread (range 2.5 pt) at 72k, resolving
+F8's accuracy/stability tension. The 3-seed run `p25_eff32_s{0,1,2}` (group `phase25-grad-accum`)
+doubles as the d1024/L4 (70M) point of the Phase-3 capacity sweep. **Caveat: n=3** — not re-confirmed
+at 6 seeds (the user chose to lock on n=3 and proceed to Phase 3). All Phase-3 ablations build on
+this base and report mean±std over ≥3 seeds; an effect counts only if it clears the ~1-pt floor.
+
 ---
 
 ## Methods notes (provenance / things that affect comparability)
