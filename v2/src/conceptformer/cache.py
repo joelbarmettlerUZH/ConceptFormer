@@ -12,11 +12,17 @@ from pathlib import Path
 
 
 class KVCache:
-    """A single-process sqlite key→json store. Not safe to share across threads."""
+    """A sqlite key→json store. Not safe to share across threads within a process.
+
+    WAL + a generous busy timeout make it safe for several *processes* (e.g. one eval per GPU)
+    to share one cache file: readers don't block the writer, and concurrent writers serialize
+    instead of raising "database is locked".
+    """
 
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        self._con = sqlite3.connect(str(path))
+        self._con = sqlite3.connect(str(path), timeout=30.0)
+        self._con.execute("PRAGMA journal_mode=WAL")
         self._con.execute("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT)")
         self._con.commit()
 

@@ -1,8 +1,41 @@
 # ConceptFormer v2 — Plan / TODO (durable, survives context compaction)
 
-Last updated: 2026-07-02. Companion to `docs/RESEARCH_FINDINGS.md` (the evidence log).
+Last updated: 2026-07-02 (evening). Companion to `docs/RESEARCH_FINDINGS.md` (the evidence log).
 
-> ## ⏸️ RESUME HERE (2026-07-02 — Phase F pre-scaling analysis COMPLETE; next = the 300k scaling test)
+> ## ▶️ CURRENT (2026-07-02 evening — EVAL OVERHAUL, pre-grant hardening; supersedes the banner below)
+> External review found 4 eval-protocol defects (RESEARCH_FINDINGS **M7**): seed-coupled n=200
+> eval subsets (unpaired, sampling noise ~3.5 pt), tiny PopQA samples, held-out selection bias,
+> and paraphrase leakage (32.8% of val rows share a fact with train @100k seed 0). All FIXED,
+> gate-green (233 tests):
+> - `eval/evalsets.py` (frozen fixed-seed eval sets), `eval/stats.py` (Wilson/McNemar/bootstrap),
+>   `train/harness.py` fact-grouped split + `strict_val_subset`, checkpoints now carry split
+>   `meta`, `eval-final` + `eval-untrained-injection` commands, `cf-rag-budget-curve
+>   --retrieval pagerank|question|summary`, KVCache WAL, `_load_trained_checkpoint` dedup.
+> - **RUNNING:** definitive re-eval of all 18 `pc_k*_best` on FULL PopQA (14,266) + strict
+>   held-out (`scripts/eval_final_kfamily.sh`, both GPUs), then untrained-injection k8/k16 (GPU0)
+>   and the 3-mode RAG curves (GPU1). Aggregate with `scripts/aggregate_eval_final.py`.
+> - **DONE: `docs/RELATED_WORK.md`** (3-agent hf-papers sweep, 2026-07-02): closest work = xRAG
+>   2405.13792 / KBLaM 2410.10450 / Knowledge Prompts 2210.04726 / GNP 2309.15427, with per-paper
+>   differentiation; **niche decision: "scaling laws of knowledge injection into frozen LLMs"
+>   (entities x Qwen3 sizes) as the grant lead**, image-pathway injection as bounded secondary
+>   aim, 2-hop demoted to internal ablation. PISCO 2501.16075 App-G ("frozen decoders fail") is
+>   directly rebutted by our frozen-decoder KL result — use in the paper.
+> - **DONE: all re-evals + doc corrections (2026-07-02 evening).** 18 k-family + 3x 10k-corpus
+>   checkpoints re-scored on FULL PopQA (14,266) + strict held-out; untrained-injection k8/k16;
+>   3-mode RAG curves; figure regenerated. F12 carries the corrected table; GRANT_ANALYSIS
+>   Secs 1/2/3/3b/7/8 rewritten. Headline survives everything: k8 PopQA 0.477+/-0.002 vs base
+>   0.103; scale-up 2.05x on identical sets (10k 0.232 -> 100k 0.477) and strict held-out
+>   +9.2 pt with scale; untrained injection near-floor (0.130) => the encoder is the effect;
+>   concepts beat question-aware retrieval + LLM summaries 2.6-3.2x at 8 tokens; "k16 plateau"
+>   refuted (monotone thru k32, McNemar p~9e-38). Seed-std collapsed (old 4-8 pt was eval noise).
+> - **NEXT: write the grant** from GRANT_ANALYSIS Sec 8 (niche: scaling laws of knowledge
+>   injection — entities x Qwen3 sizes; secondary: VLM image-pathway injection). Then (post-
+>   grant or if GPUs idle): 300k go/no-go with eval-final (now decisive at CI ~0.8 pt). 300k
+>   corpus extract still resumable per the PAUSED banner below.
+> - Sequencing decision (user, 2026-07-02): fixes -> related work/niche -> grant application.
+>   Multi-backbone + 300k/1M scale-up are the grant's asks, not pre-grant work.
+
+> ## ⏸️ PREVIOUS RESUME POINT (2026-07-02 — Phase F pre-scaling analysis COMPLETE; next = the 300k scaling test)
 > The full pre-scaling analysis for the compute grant is DONE and synthesized in
 > **`docs/GRANT_ANALYSIS.md`** (7 sections: token-efficiency figure, RAG baseline, k-curve/knee,
 > PopQA generalization, graph-faithfulness×k, capability preservation, v1 comparison).

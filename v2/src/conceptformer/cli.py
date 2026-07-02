@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
+
+if TYPE_CHECKING:  # heavy infer-group types, imported lazily at runtime
+    from conceptformer.model.chat import ChatModel
+    from conceptformer.train.trainer import ConceptTrainer
 
 import typer
 from rich import print as rprint
@@ -15,6 +19,7 @@ from conceptformer.data.benchmarks import load_popqa, subject_qids
 from conceptformer.data.coverage import audit_coverage
 from conceptformer.data.snapshot import build_snapshot_parallel
 from conceptformer.data.wikidata import WikidataClient
+from conceptformer.schemas import Subgraph
 
 app = typer.Typer(add_completion=False, help="ConceptFormer v2 data pipeline.")
 
@@ -682,6 +687,9 @@ def cf_train(
     steps: Annotated[int, typer.Option()] = 600,
     batch: Annotated[int, typer.Option(help="minibatch size")] = 8,
     val_frac: Annotated[float, typer.Option(help="held-out question fraction")] = 0.3,
+    split_mode: Annotated[
+        str, typer.Option(help="held-out unit: fact (no paraphrase leakage) | question (legacy)")
+    ] = "fact",
     eval_every: Annotated[int, typer.Option()] = 100,
     eval_n: Annotated[int, typer.Option(help="held-out examples scored per eval (capped)")] = 120,
     popqa_eval: Annotated[int, typer.Option(help="after training, score N unseen PopQA")] = 0,
@@ -714,10 +722,14 @@ def cf_train(
     import random
 
     from conceptformer.data.snapshot import iter_subgraphs
+    from conceptformer.eval.evalsets import sample_rows
     from conceptformer.generate.dataset import load_cftrain_qa
     from conceptformer.model.backbone import Backbone
     from conceptformer.model.chat import ChatModel
-    from conceptformer.train.harness import split_by_held_out_questions
+    from conceptformer.train.harness import (
+        split_by_held_out_facts,
+        split_by_held_out_questions,
+    )
     from conceptformer.train.trainer import (
         AUGMENT_SYSTEMS,
         HELD_OUT_EVAL_SYSTEM,
@@ -730,7 +742,11 @@ def cf_train(
     qa_dir = settings.data_root / "cf_train" / dataset
     rows = load_cftrain_qa(qa_dir / "qa_distill.jsonl")
     sg_by_qid = {sg.center.qid: sg for sg in iter_subgraphs(settings.snapshots_dir / snapshot)}
-    train_rows, val_rows = split_by_held_out_questions(rows, val_frac=val_frac, seed=seed)
+    # "fact" groups paraphrases of the same (entity, fact) so they never straddle train/val
+    # (question-level splitting leaked paraphrases into "held-out"); "question" = legacy mode,
+    # kept only to reproduce old checkpoints' splits.
+    splitter = split_by_held_out_facts if split_mode == "fact" else split_by_held_out_questions
+    train_rows, val_rows = splitter(rows, val_frac=val_frac, seed=seed)
     train_tuples = [
         (sg_by_qid[r.subject_qid], r.question, r.teacher_target_ids, r.answer_qid)
         for r in train_rows
@@ -738,8 +754,9 @@ def cf_train(
     ]
     val_rows = [r for r in val_rows if r.subject_qid in sg_by_qid]
     rng = random.Random(seed)
-    # Fixed eval subset so the curve is comparable across reports (full val would be too slow).
-    eval_val = rng.sample(val_rows, min(eval_n, len(val_rows)))
+    # Fixed-seed eval subset (NOT the training seed): every run/config/seed scores the SAME
+    # held-out questions, so trajectories compare and per-item outputs pair (evalsets.py).
+    eval_val = sample_rows(val_rows, eval_n)
     rprint(
         f"train {len(train_tuples)} examples / val {len(val_rows)} held-out questions "
         f"(eval on {len(eval_val)}; k={k}, {steps} steps, batch {batch})"
@@ -785,6 +802,7 @@ def cf_train(
                 "gate_lr": cfg.gate_lr, "temperature": temperature, "ce_weight": cfg.ce_weight,
                 "steps": steps, "batch": batch, "warmup_steps": cfg.warmup_steps,
                 "rag_context_tokens": cfg.rag_context_tokens, "val_frac": val_frac,
+                "split_mode": split_mode,
                 "eval_n": eval_n, "augment": augment, "subsample": subsample,
                 "cache_teacher": cache_teacher,
                 "placement": placement, "grad_clip": grad_clip, "grad_accum": grad_accum,
@@ -824,18 +842,13 @@ def cf_train(
     popqa_items: list = []
     if popqa_eval:
         from conceptformer.data.benchmarks import load_popqa
+        from conceptformer.eval.evalsets import popqa_eval_items
 
         popqa_sgs = {
             sg.center.qid: sg for sg in iter_subgraphs(settings.snapshots_dir / popqa_snapshot)
         }
-        examples = [e for e in load_popqa() if e.subject_qid in popqa_sgs and e.answer_labels]
-        rng.shuffle(examples)
-        for e in examples[: popqa_eval * 2]:  # over-sample; some neighborhoods may be empty
-            sg = popqa_sgs[e.subject_qid]
-            if sg.edges:
-                popqa_items.append((sg, e.question, e.answer_labels, e.answer_qid))
-            if len(popqa_items) >= popqa_eval:
-                break
+        # Fixed-seed frozen subset (same questions for every run/seed/config → pairable).
+        popqa_items = popqa_eval_items(load_popqa(), popqa_sgs, n=popqa_eval)
 
     def report(tag: str, step: int = 0) -> dict:
         m = trainer.evaluate()  # held-out (the default stored set)
@@ -882,9 +895,9 @@ def cf_train(
             if eval_val:
                 log["concept/norm"] = trainer.concept_norm(sg_by_qid[eval_val[0].subject_qid])
             # both param-group LRs (encoder + gate may differ / be scheduled independently).
-            for grp in trainer.opt.param_groups:
+            for grp in trainer.optimizer.param_groups:
                 log[f"train/lr_{grp.get('name', 'g')}"] = grp["lr"]
-            log["train/lr"] = trainer.opt.param_groups[0]["lr"]
+            log["train/lr"] = trainer.optimizer.param_groups[0]["lr"]
             wb.log(log, step=step)
         return m
 
@@ -907,6 +920,12 @@ def cf_train(
     # file) when held-out improves; that is the "checkpoint-selected" model downstream evals need.
     best_ho = -1.0
     best_path = settings.data_root / "checkpoints" / f"{checkpoint}_best.pt" if checkpoint else None
+    # Stored in checkpoints so eval-final can reconstruct this run's exact train/val split
+    # (legacy checkpoints without it are assumed question-mode split with the training seed).
+    split_meta = {
+        "split_mode": split_mode, "split_seed": seed, "val_frac": val_frac,
+        "dataset": dataset, "snapshot": snapshot,
+    }
     for s in range(1, steps + 1):
         sample = rng.sample(train_pool, min(eff_batch, len(train_pool)))
         loss = accum_fn(split_microbatches(sample, accum)) if accum > 1 else step_fn(sample)
@@ -914,16 +933,17 @@ def cf_train(
             step_log = {
                 "train/loss": loss,
                 "train/grad_norm": trainer.last_grad_norm,
-                "train/lr": trainer.opt.param_groups[0]["lr"],
+                "train/lr": trainer.optimizer.param_groups[0]["lr"],
             }
-            for grp in trainer.opt.param_groups:
+            for grp in trainer.optimizer.param_groups:
                 step_log[f"train/lr_{grp.get('name', 'g')}"] = grp["lr"]
             wb.log(step_log, step=s)
         if s % eval_every == 0 or s == steps:
             m = report(f"step {s}", s)
             if best_path is not None and m["concept_acc"] > best_ho:
                 best_ho = m["concept_acc"]
-                trainer.save_checkpoint(best_path)  # EMA off for this config → current == evaluated
+                # EMA off for this config → current == evaluated
+                trainer.save_checkpoint(best_path, meta=split_meta)
 
     # held-in / PopQA were scored every checkpoint inside report() (full trajectories in W&B).
     # Echo the final overfit-vs-underfit read and mirror the converged values into the summary.
@@ -954,7 +974,7 @@ def cf_train(
 
     if checkpoint:
         ckpt_path = settings.data_root / "checkpoints" / f"{checkpoint}.pt"
-        trainer.save_checkpoint(ckpt_path)
+        trainer.save_checkpoint(ckpt_path, meta=split_meta)
         rprint(f"[green]saved checkpoint[/] → {ckpt_path}")
         if wb:
             # Push the trained encoder+gate to W&B as a durable, versioned model artifact so the
@@ -1014,6 +1034,286 @@ def cf_train(
     rprint("[green]done[/] — concept_acc on HELD-OUT questions is the generalization signal.")
 
 
+def _load_trained_checkpoint(
+    checkpoint: str, model: str, device: str, *, use_generation_cache: bool = False
+) -> tuple:
+    """Load a trained checkpoint into an eval-ready trainer (pulls the W&B artifact if needed).
+
+    Returns ``(trainer, blob, chat)``: ``blob`` carries ``config`` + optional ``meta`` (split
+    provenance for reconstructing the run's exact train/val split); ``chat`` is the underlying
+    ``ChatModel`` for text-bracket generation. ``use_generation_cache`` wires the sqlite greedy
+    cache in, so checkpoint-independent base/RAG brackets are paid once across re-evals.
+    """
+    import torch
+
+    from conceptformer.cache import KVCache
+    from conceptformer.model.backbone import Backbone
+    from conceptformer.model.chat import ChatModel
+    from conceptformer.train.trainer import ConceptTrainer, TrainConfig
+
+    ckpt_path = Path(checkpoint)
+    if not ckpt_path.exists():
+        ckpt_path = settings.data_root / "checkpoints" / f"{checkpoint}.pt"
+    if not ckpt_path.exists():
+        # Fall back to the W&B model artifact so a result is reproducible without the local file.
+        import wandb as _wandb
+
+        rprint(f"[dim]checkpoint not local; pulling W&B artifact model:{checkpoint}:latest…[/dim]")
+        art = _wandb.Api().artifact(
+            f"university-of-zurich/conceptformer-v2/{checkpoint}:latest", type="model"
+        )
+        ckpt_path = Path(art.download()) / f"{checkpoint}.pt"
+    blob = torch.load(ckpt_path, map_location=device, weights_only=False)
+    cfg = TrainConfig(**blob["config"])
+    cache = KVCache(settings.generation_cache_path) if use_generation_cache else None
+    chat = ChatModel(model, device=device, cache=cache)
+    trainer = ConceptTrainer(Backbone(chat), cfg)
+    trainer.model.load_state_dict(blob["model"])
+    trainer.model.eval()
+    rprint(
+        f"[bold]loaded[/] {ckpt_path.name}  "
+        f"(k={cfg.k}, d_model={cfg.d_model}, n_layers={cfg.n_layers})"
+    )
+    return trainer, blob, chat
+
+
+def _reconstruct_split(
+    rows: list, blob: dict, fallback_seed: int, fallback_val_frac: float
+) -> tuple[list, list, dict]:
+    """Rebuild the train/val split a checkpoint was trained under, from its stored meta.
+
+    Legacy checkpoints (no ``meta``) used the question-level split seeded with the training
+    seed; new ones record mode/seed/frac explicitly. Getting this wrong silently scores
+    trained questions as "held-out", so it lives in one place.
+    """
+    from conceptformer.train.harness import (
+        split_by_held_out_facts,
+        split_by_held_out_questions,
+    )
+
+    meta = blob.get("meta") or {}
+    cfg_seed = int(blob.get("config", {}).get("seed", fallback_seed))
+    split_seed = int(meta.get("split_seed", cfg_seed))
+    val_frac = float(meta.get("val_frac", fallback_val_frac))
+    mode = str(meta.get("split_mode", "question"))
+    splitter = split_by_held_out_facts if mode == "fact" else split_by_held_out_questions
+    train_rows, val_rows = splitter(rows, val_frac=val_frac, seed=split_seed)
+    return train_rows, val_rows, {"split_mode": mode, "split_seed": split_seed,
+                                  "val_frac": val_frac}
+
+
+@app.command("eval-final")
+def eval_final(
+    checkpoint: Annotated[str, typer.Option(help="trained checkpoint name or path")],
+    dataset: Annotated[str, typer.Option()] = "cftrain_qa_100k",
+    snapshot: Annotated[str, typer.Option()] = "cftrain_100k",
+    popqa_snapshot: Annotated[str, typer.Option()] = "popqa_full",
+    held_out_n: Annotated[int, typer.Option(help="strict held-out questions (0 = all)")] = 2000,
+    popqa_n: Annotated[int, typer.Option(help="PopQA questions (0 = FULL benchmark)")] = 0,
+    gen_batch: Annotated[int, typer.Option()] = 64,
+    max_new: Annotated[int, typer.Option()] = 32,
+    model: Annotated[str, typer.Option()] = "Qwen/Qwen3-0.6B",
+    device: Annotated[str, typer.Option()] = "cuda",
+    out_dir: Annotated[str, typer.Option(help="report dir (default data/analysis/eval_final)")]
+    = "",
+) -> None:
+    """Definitive post-hoc eval of a checkpoint: strict held-out + FULL PopQA, per-item dumps.
+
+    Fixes the historical eval defects in one place (methods note M7): frozen fixed-seed eval
+    sets shared by every checkpoint (so per-item dumps pair across runs — eval/stats.py),
+    Wilson CIs instead of bare points, a paraphrase-leakage-free held-out subset
+    (strict_val_subset), and the WHOLE PopQA benchmark (n=200 sampling noise ~3.5 pt shrinks
+    to ~0.4 pt at n~14k). Base/RAG brackets are checkpoint-independent and cached on disk
+    (generations.sqlite), so re-evaluating the next checkpoint only pays the concept pass.
+    """
+    from conceptformer.generate.dataset import load_cftrain_qa
+
+    trainer, blob, chat = _load_trained_checkpoint(
+        checkpoint, model, device, use_generation_cache=True
+    )
+    rows = load_cftrain_qa(settings.data_root / "cf_train" / dataset / "qa_distill.jsonl")
+    train_rows, val_rows, split_info = _reconstruct_split(rows, blob, 0, 0.3)
+    _definitive_eval(
+        trainer, chat, train_rows, val_rows, split_info,
+        dataset=dataset, snapshot=snapshot, popqa_snapshot=popqa_snapshot,
+        held_out_n=held_out_n, popqa_n=popqa_n, gen_batch=gen_batch, max_new=max_new,
+        report_name=checkpoint, report_extra={"checkpoint": checkpoint,
+                                              "config": blob["config"]},
+        out_dir=out_dir,
+    )
+
+
+def _definitive_eval(
+    trainer: ConceptTrainer, chat: ChatModel,
+    train_rows: list, val_rows: list, split_info: dict, *,
+    dataset: str, snapshot: str, popqa_snapshot: str,
+    held_out_n: int, popqa_n: int, gen_batch: int, max_new: int,
+    report_name: str, report_extra: dict, out_dir: str,
+) -> None:
+    """Shared eval core for eval-final / eval-untrained-injection (same sets, same dumps).
+
+    Scores concept/base/RAG on the strict (fact-leakage-free) held-out subset + the frozen
+    PopQA set, writes per-item JSONL (for paired stats) and a summary with Wilson CIs.
+    """
+    from conceptformer.data.snapshot import iter_subgraphs
+    from conceptformer.eval.evalsets import EVAL_SAMPLE_SEED, popqa_eval_items, sample_rows
+    from conceptformer.eval.metrics import popqa_official
+    from conceptformer.eval.stats import summarize_accuracy
+    from conceptformer.generate.signal import answer_ok
+    from conceptformer.train.harness import is_answerable, strict_val_subset
+    from conceptformer.train.trainer import TEACHER_SYSTEM
+    from conceptformer.verbalize import verbalize_with_answer
+
+    sg_by_qid = {sg.center.qid: sg for sg in iter_subgraphs(settings.snapshots_dir / snapshot)}
+    answerable_val = [
+        r for r in val_rows
+        if is_answerable(r) and r.subject_qid in sg_by_qid and r.accepted_answers
+    ]
+    strict = strict_val_subset(train_rows, answerable_val)
+    leak_frac = 1.0 - (len(strict) / max(1, len(answerable_val)))
+    held_out = [
+        (sg_by_qid[r.subject_qid], r.question, r.accepted_answers, r.answer_qid)
+        for r in sample_rows(strict, held_out_n)
+    ]
+
+    popqa_sgs = {
+        sg.center.qid: sg for sg in iter_subgraphs(settings.snapshots_dir / popqa_snapshot)
+    }
+    popqa = popqa_eval_items(load_popqa(), popqa_sgs, n=popqa_n)
+    rprint(
+        f"[bold]eval[/] {report_name}: strict held-out n={len(held_out)} "
+        f"(fact-leaky val rows removed: {leak_frac:.1%}), PopQA n={len(popqa)}"
+    )
+
+    def facts_for(sg: Subgraph, answer_qid: str | None) -> str:
+        budget = int(trainer.cfg.rag_context_tokens)
+        return verbalize_with_answer(sg, answer_qid, chat.count_tokens, budget)
+
+    def eval_items(name: str, items: list, official: bool) -> tuple[dict, list[dict]]:
+        concept_preds: list[str] = []
+        for i in range(0, len(items), gen_batch):
+            chunk = items[i : i + gen_batch]
+            concept_preds += trainer.generate_student_batch(
+                [(sg, q) for sg, q, _, _ in chunk], max_new, TEACHER_SYSTEM
+            )
+        base_preds = chat.generate_batch(
+            [(TEACHER_SYSTEM, q) for _, q, _, _ in items],
+            max_new_tokens=max_new, batch_size=gen_batch,
+        )
+        rag_preds = chat.generate_batch(
+            [(TEACHER_SYSTEM, f"{facts_for(sg, aq)}\n\n{q}") for sg, q, _, aq in items],
+            max_new_tokens=max_new, batch_size=gen_batch,
+        )
+        per_item: list[dict] = []
+        for (sg, q, gold, _), cp, bp, rp in zip(
+            items, concept_preds, base_preds, rag_preds, strict=True
+        ):
+            row = {
+                "set": name, "subject_qid": sg.center.qid, "question": q,
+                "gold": list(gold),
+                "concept": answer_ok(cp, gold), "base": answer_ok(bp, gold),
+                "rag": answer_ok(rp, gold), "concept_pred": cp,
+            }
+            if official:  # the published PopQA metric, for literature comparability
+                row["concept_official"] = popqa_official(cp, gold)
+                row["base_official"] = popqa_official(bp, gold)
+            per_item.append(row)
+        summary = {
+            "n": len(per_item),
+            "concept": summarize_accuracy([r["concept"] for r in per_item]),
+            "base": summarize_accuracy([r["base"] for r in per_item]),
+            "rag": summarize_accuracy([r["rag"] for r in per_item]),
+        }
+        if official:
+            summary["concept_official"] = summarize_accuracy(
+                [r["concept_official"] for r in per_item]
+            )
+        return summary, per_item
+
+    report_dir = (
+        Path(out_dir) if out_dir
+        else settings.data_root / "analysis" / "eval_final" / report_name
+    )
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report: dict = {
+        **report_extra, "split": split_info,
+        "eval_sample_seed": EVAL_SAMPLE_SEED, "dataset": dataset,
+        "strict_leak_frac_removed": round(leak_frac, 4),
+    }
+    for name, items, official in (("held_out", held_out, False), ("popqa", popqa, True)):
+        if not items:
+            continue
+        summary, per_item = eval_items(name, items, official)
+        report[name] = summary
+        with (report_dir / f"{name}_items.jsonl").open("w", encoding="utf-8") as fh:
+            for row in per_item:
+                fh.write(json.dumps(row) + "\n")
+        c, b, r = summary["concept"], summary["base"], summary["rag"]
+        rprint(
+            f"  [bold]{name}[/] (n={summary['n']}): concept={c['acc']:.1%} "
+            f"[{c['ci95'][0]:.1%}, {c['ci95'][1]:.1%}]  base={b['acc']:.1%}  rag={r['acc']:.1%}"
+        )
+    (report_dir / "summary.json").write_text(json.dumps(report, indent=2))
+    rprint(f"[green]wrote[/] {report_dir}/summary.json (+ per-item jsonl for paired stats)")
+
+
+@app.command("eval-untrained-injection")
+def eval_untrained_injection(
+    k: Annotated[int, typer.Option(help="concept slots to fill with top-k edge embeddings")] = 8,
+    dataset: Annotated[str, typer.Option()] = "cftrain_qa_100k",
+    snapshot: Annotated[str, typer.Option()] = "cftrain_100k",
+    popqa_snapshot: Annotated[str, typer.Option()] = "popqa_full",
+    held_out_n: Annotated[int, typer.Option(help="strict held-out questions (0 = all)")] = 2000,
+    popqa_n: Annotated[int, typer.Option(help="PopQA questions (0 = FULL benchmark)")] = 0,
+    split_seed: Annotated[int, typer.Option(help="split to eval against (match eval-final)")] = 0,
+    split_mode: Annotated[str, typer.Option(help="fact | question (match the checkpoint)")]
+    = "question",
+    val_frac: Annotated[float, typer.Option()] = 0.3,
+    gen_batch: Annotated[int, typer.Option()] = 64,
+    max_new: Annotated[int, typer.Option()] = 32,
+    model: Annotated[str, typer.Option()] = "Qwen/Qwen3-0.6B",
+    device: Annotated[str, typer.Option()] = "cuda",
+    out_dir: Annotated[str, typer.Option()] = "",
+) -> None:
+    """The no-encoder control: top-k edge label-embeddings spliced in WITHOUT any training.
+
+    Fills the same k concept slots with mean-pooled (property, neighbor) embeddings of the
+    entity's top-k PageRank edges (model/baselines.py). The trained resampler must beat this,
+    or the learned graph->concept mapping isn't earning its parameters. Same frozen eval sets
+    and per-item dumps as eval-final, so the comparison is paired.
+    """
+    from conceptformer.cache import KVCache
+    from conceptformer.generate.dataset import load_cftrain_qa
+    from conceptformer.model.backbone import Backbone
+    from conceptformer.model.baselines import TopKMeanEdgeBaseline
+    from conceptformer.model.chat import ChatModel
+    from conceptformer.train.harness import (
+        split_by_held_out_facts,
+        split_by_held_out_questions,
+    )
+    from conceptformer.train.trainer import ConceptTrainer, TrainConfig
+
+    chat = ChatModel(model, device=device, cache=KVCache(settings.generation_cache_path))
+    trainer = ConceptTrainer(
+        Backbone(chat), TrainConfig(k=k, seed=split_seed),
+        concept_model=TopKMeanEdgeBaseline(k),
+    )
+    trainer.model.eval()
+
+    rows = load_cftrain_qa(settings.data_root / "cf_train" / dataset / "qa_distill.jsonl")
+    splitter = split_by_held_out_facts if split_mode == "fact" else split_by_held_out_questions
+    train_rows, val_rows = splitter(rows, val_frac=val_frac, seed=split_seed)
+    split_info = {"split_mode": split_mode, "split_seed": split_seed, "val_frac": val_frac}
+    name = f"untrained_topk_mean_k{k}"
+    _definitive_eval(
+        trainer, chat, train_rows, val_rows, split_info,
+        dataset=dataset, snapshot=snapshot, popqa_snapshot=popqa_snapshot,
+        held_out_n=held_out_n, popqa_n=popqa_n, gen_batch=gen_batch, max_new=max_new,
+        report_name=name, report_extra={"baseline": name, "k": k},
+        out_dir=out_dir,
+    )
+
+
 @app.command("eval-prompt-robustness")
 def eval_prompt_robustness(
     checkpoint: Annotated[str, typer.Option(help="checkpoint name under data/checkpoints or path")],
@@ -1034,69 +1334,34 @@ def eval_prompt_robustness(
     held-OUT prompt, and reports the spread (mean / std / worst-case) -- low variance and a high
     floor = prompt-robust vectors. Use it to compare two checkpoints (e.g. subsample on vs off).
     """
-    import random
     import statistics
-
-    import torch
 
     from conceptformer.data.benchmarks import load_popqa
     from conceptformer.data.snapshot import iter_subgraphs
+    from conceptformer.eval.evalsets import popqa_eval_items, sample_rows
     from conceptformer.generate.dataset import load_cftrain_qa
-    from conceptformer.model.backbone import Backbone
-    from conceptformer.model.chat import ChatModel
-    from conceptformer.train.harness import split_by_held_out_questions
     from conceptformer.train.trainer import (
         AUGMENT_SYSTEMS,
         HELD_OUT_EVAL_SYSTEM,
         TEACHER_SYSTEM,
-        ConceptTrainer,
-        TrainConfig,
     )
 
-    ckpt_path = Path(checkpoint)
-    if not ckpt_path.exists():
-        ckpt_path = settings.data_root / "checkpoints" / f"{checkpoint}.pt"
-    if not ckpt_path.exists():
-        # Fall back to the W&B model artifact so a result is reproducible without the local file.
-        import wandb as _wandb
-
-        rprint(f"[dim]checkpoint not local; pulling W&B artifact model:{checkpoint}:latest…[/dim]")
-        api = _wandb.Api()
-        art = api.artifact(
-            f"university-of-zurich/conceptformer-v2/{checkpoint}:latest", type="model"
-        )
-        ckpt_path = Path(art.download()) / f"{checkpoint}.pt"
-    blob = torch.load(ckpt_path, map_location=device, weights_only=False)
-    cfg = TrainConfig(**blob["config"])
-    backbone = Backbone(ChatModel(model, device=device))
-    trainer = ConceptTrainer(backbone, cfg)
-    trainer.model.load_state_dict(blob["model"])
-    trainer.model.eval()
-    rprint(
-        f"[bold]loaded[/] {ckpt_path.name}  "
-        f"(k={cfg.k}, d_model={cfg.d_model}, n_layers={cfg.n_layers})"
-    )
+    trainer, blob, _ = _load_trained_checkpoint(checkpoint, model, device)
 
     qa_dir = settings.data_root / "cf_train" / dataset
     rows = load_cftrain_qa(qa_dir / "qa_distill.jsonl")
     sg_by_qid = {sg.center.qid: sg for sg in iter_subgraphs(settings.snapshots_dir / snapshot)}
-    _, val_rows = split_by_held_out_questions(rows, val_frac=val_frac, seed=seed)
+    # Reconstruct THIS checkpoint's split, then sample the frozen fixed-seed eval subset from
+    # ITS val side (identical across checkpoints -> results pair).
+    _, val_rows, _split_info = _reconstruct_split(rows, blob, seed, val_frac)
     val_rows = [r for r in val_rows if r.subject_qid in sg_by_qid]
-    rng = random.Random(seed)
-    eval_val = rng.sample(val_rows, min(eval_n, len(val_rows)))
+    eval_val = sample_rows(val_rows, eval_n)
 
     popqa_sgs = {
         sg.center.qid: sg for sg in iter_subgraphs(settings.snapshots_dir / popqa_snapshot)
     }
-    examples = [e for e in load_popqa() if e.subject_qid in popqa_sgs and e.answer_labels]
-    rng.shuffle(examples)
-    popqa_items = []
-    for e in examples[: popqa_n * 2]:
-        sg = popqa_sgs[e.subject_qid]
-        if sg.edges:
-            popqa_items.append((sg, e.question, e.answer_labels, e.answer_qid))
-        if len(popqa_items) >= popqa_n:
-            break
+    # Frozen fixed-seed PopQA subset — identical across checkpoints, so results pair.
+    popqa_items = popqa_eval_items(load_popqa(), popqa_sgs, n=popqa_n)
 
     # TEACHER_SYSTEM + the 5 augmentation prompts were all SEEN-style training prompts here (this
     # checkpoint trained under TEACHER_SYSTEM only); HELD_OUT_EVAL_SYSTEM is a never-seen phrasing.
@@ -1145,8 +1410,6 @@ def cf_graph_faithfulness(
     """
     import random
 
-    import torch
-
     from conceptformer.data.snapshot import iter_subgraphs
     from conceptformer.eval.counterfactual import (
         ablate_neighbor,
@@ -1158,32 +1421,14 @@ def cf_graph_faithfulness(
     )
     from conceptformer.generate.dataset import load_cftrain_qa
     from conceptformer.generate.signal import answer_ok
-    from conceptformer.model.backbone import Backbone
-    from conceptformer.model.chat import ChatModel
-    from conceptformer.train.harness import split_by_held_out_questions
-    from conceptformer.train.trainer import TEACHER_SYSTEM, ConceptTrainer, TrainConfig
+    from conceptformer.train.trainer import TEACHER_SYSTEM
 
-    ckpt_path = Path(checkpoint)
-    if not ckpt_path.exists():
-        ckpt_path = settings.data_root / "checkpoints" / f"{checkpoint}.pt"
-    if not ckpt_path.exists():
-        import wandb as _wandb
-
-        rprint(f"[dim]checkpoint not local; pulling W&B artifact model:{checkpoint}:latest…[/dim]")
-        art = _wandb.Api().artifact(
-            f"university-of-zurich/conceptformer-v2/{checkpoint}:latest", type="model"
-        )
-        ckpt_path = Path(art.download()) / f"{checkpoint}.pt"
-    blob = torch.load(ckpt_path, map_location=device, weights_only=False)
-    cfg = TrainConfig(**blob["config"])
-    backbone = Backbone(ChatModel(model, device=device))
-    trainer = ConceptTrainer(backbone, cfg)
-    trainer.model.load_state_dict(blob["model"])
-    trainer.model.eval()
+    trainer, blob, _ = _load_trained_checkpoint(checkpoint, model, device)
+    cfg = trainer.cfg
 
     rows = load_cftrain_qa(settings.data_root / "cf_train" / dataset / "qa_distill.jsonl")
     sg_by_qid = {sg.center.qid: sg for sg in iter_subgraphs(settings.snapshots_dir / snapshot)}
-    _, val_rows = split_by_held_out_questions(rows, val_frac=val_frac, seed=seed)
+    _, val_rows, _split_info = _reconstruct_split(rows, blob, seed, val_frac)
     # Single-fact questions only: the answer maps to exactly one edge, so "the answer edge" is
     # well-defined for swap/ablate. (Compositional questions span >1 edge — a separate probe.)
     probes = [
@@ -1292,25 +1537,15 @@ def cf_capability_preservation(
 
     from conceptformer.data.snapshot import iter_subgraphs
     from conceptformer.generate.dataset import load_cftrain_qa
-    from conceptformer.model.backbone import Backbone
-    from conceptformer.model.chat import ChatModel
     from conceptformer.model.featurizer import featurize_subgraph
     from conceptformer.model.injection import build_position_ids
-    from conceptformer.train.harness import split_by_held_out_questions
-    from conceptformer.train.trainer import TEACHER_SYSTEM, ConceptTrainer, TrainConfig
+    from conceptformer.train.trainer import TEACHER_SYSTEM
 
-    ckpt_path = Path(checkpoint)
-    if not ckpt_path.exists():
-        ckpt_path = settings.data_root / "checkpoints" / f"{checkpoint}.pt"
-    blob = torch.load(ckpt_path, map_location=device, weights_only=False)
-    cfg = TrainConfig(**blob["config"])
-    trainer = ConceptTrainer(Backbone(ChatModel(model, device=device)), cfg)
-    trainer.model.load_state_dict(blob["model"])
-    trainer.model.eval()
+    trainer, blob, _ = _load_trained_checkpoint(checkpoint, model, device)
 
     rows = load_cftrain_qa(settings.data_root / "cf_train" / dataset / "qa_distill.jsonl")
     sg_by = {sg.center.qid: sg for sg in iter_subgraphs(settings.snapshots_dir / snapshot)}
-    _, val = split_by_held_out_questions(rows, val_frac=val_frac, seed=seed)
+    _, val, _split_info = _reconstruct_split(rows, blob, seed, val_frac)
     ctrl = [r for r in val if r.task_type == "control" and r.subject_qid in sg_by]
     rng = random.Random(seed)
     if ctrl:
@@ -1361,7 +1596,9 @@ def cf_capability_preservation(
         reduction="none", log_target=True,
     ).sum(-1)
 
-    rprint(f"[bold]capability preservation[/] {ckpt_path.name} k={cfg.k}; {len(items)} controls")
+    rprint(
+        f"[bold]capability preservation[/] {checkpoint} k={trainer.cfg.k}; {len(items)} controls"
+    )
     rprint(f"  greedy-agreement (concept == base output): [bold]{agree / len(items):.1%}[/]")
     rprint(f"  next-token KL(base-concept): mean [bold]{kl.mean():.4f}[/] "
            f"median {kl.median():.4f} max {kl.max():.3f}")
@@ -1375,74 +1612,136 @@ def cf_rag_budget_curve(
     popqa_snapshot: Annotated[str, typer.Option()] = "popqa_full",
     budgets: Annotated[str, typer.Option(help="fact-token budgets; 0 = base/no-facts")] =
     "0,8,16,32,64,128,2048",
+    retrieval: Annotated[
+        str, typer.Option(help="fact selection: pagerank | question | summary")
+    ] = "pagerank",
     eval_n: Annotated[int, typer.Option()] = 300,
     popqa_n: Annotated[int, typer.Option()] = 300,
     val_frac: Annotated[float, typer.Option()] = 0.3,
-    seed: Annotated[int, typer.Option()] = 0,
+    split_seed: Annotated[int, typer.Option(help="split to eval against (match eval-final)")] = 0,
+    split_mode: Annotated[str, typer.Option(help="fact | question (match the checkpoint)")]
+    = "question",
     model: Annotated[str, typer.Option()] = "Qwen/Qwen3-0.6B",
     device: Annotated[str, typer.Option()] = "cuda",
     out: Annotated[str, typer.Option(help="write JSON here")] = "",
 ) -> None:
     """Text-RAG accuracy vs its INPUT-TOKEN budget — the baseline half of the token-efficiency plot.
 
-    The frozen LLM reads facts as text at each budget, using REALISTIC retrieval (top-PageRank
-    `verbalize_budgeted`, NO answer guarantee — so cutting the budget can drop the answer fact,
-    unlike the training teacher). Reports accuracy AND median knowledge-token cost per budget, on
-    held-out questions AND unseen-entity PopQA. Overlay vs the concept k-curve (k tokens) to get
-    accuracy-vs-token-cost. budget 0 = base (no facts).
+    Three retrieval modes so the figure cannot be attacked as a strawman at small budgets:
+    - ``pagerank``: query-INDEPENDENT top-PageRank truncation — the apples-to-apples competitor
+      for query-independent concept tokens (no answer guarantee; small budgets can drop the fact).
+    - ``question``: query-AWARE — facts ranked by embedding similarity to the question (the frozen
+      LLM's own label embeddings), so a tiny budget can hold the one relevant fact. The strongest
+      per-question text baseline.
+    - ``summary``: query-independent LLM-written compression — the frozen LLM summarizes the full
+      neighborhood into <= budget tokens (enforced by max_new_tokens), cached per (entity, budget).
+
+    Held-out uses the STRICT (fact-leakage-free) val side of the given split and the frozen
+    fixed-seed subset, so items align with eval-final's per-item dumps for paired comparisons.
+    budget 0 = base (no facts).
     """
     import json
-    import random
 
     from conceptformer.data.benchmarks import load_popqa
     from conceptformer.data.snapshot import iter_subgraphs
+    from conceptformer.eval.evalsets import popqa_eval_items, sample_rows
+    from conceptformer.eval.retrieval import rank_edges_by_question, summary_prompt
     from conceptformer.generate.dataset import load_cftrain_qa
     from conceptformer.generate.signal import answer_ok
     from conceptformer.generate.teacher import cftrain_prompt
+    from conceptformer.model.backbone import Backbone
     from conceptformer.model.chat import ChatModel
-    from conceptformer.train.harness import split_by_held_out_questions
-    from conceptformer.verbalize import verbalize_budgeted
+    from conceptformer.train.harness import (
+        is_answerable,
+        split_by_held_out_facts,
+        split_by_held_out_questions,
+        strict_val_subset,
+    )
+    from conceptformer.verbalize import verbalize, verbalize_budgeted
 
-    chat = ChatModel(model, device=device)
+    if retrieval not in ("pagerank", "question", "summary"):
+        raise typer.BadParameter(f"unknown retrieval mode {retrieval!r}")
+    from conceptformer.cache import KVCache
+
+    chat = ChatModel(model, device=device, cache=KVCache(settings.generation_cache_path))
+    backbone = Backbone(chat) if retrieval == "question" else None
     budget_list = [int(b) for b in budgets.split(",")]
 
-    # held-out: (subgraph, question, accepted_answers)
+    # held-out: (subgraph, question, accepted_answers) from the strict val side of the split.
     rows = load_cftrain_qa(settings.data_root / "cf_train" / dataset / "qa_distill.jsonl")
     sg_by = {sg.center.qid: sg for sg in iter_subgraphs(settings.snapshots_dir / snapshot)}
-    _, val = split_by_held_out_questions(rows, val_frac=val_frac, seed=seed)
-    rng = random.Random(seed)
-    ho = [(sg_by[r.subject_qid], r.question, r.accepted_answers) for r in val
-          if r.subject_qid in sg_by and r.accepted_answers]
-    rng.shuffle(ho)
-    ho = ho[:eval_n]
+    splitter = split_by_held_out_facts if split_mode == "fact" else split_by_held_out_questions
+    train_rows, val = splitter(rows, val_frac=val_frac, seed=split_seed)
+    answerable = [
+        r for r in val if is_answerable(r) and r.subject_qid in sg_by and r.accepted_answers
+    ]
+    ho_rows = sample_rows(strict_val_subset(train_rows, answerable), eval_n)
+    ho = [(sg_by[r.subject_qid], r.question, r.accepted_answers) for r in ho_rows]
 
-    # PopQA (unseen entities)
+    # PopQA (unseen entities) — same frozen subset eval-final scores.
     pq_sg = {sg.center.qid: sg for sg in iter_subgraphs(settings.snapshots_dir / popqa_snapshot)}
-    pq = [(pq_sg[e.subject_qid], e.question, e.answer_labels) for e in load_popqa()
-          if e.subject_qid in pq_sg and e.answer_labels and pq_sg[e.subject_qid].edges]
-    rng.shuffle(pq)
-    pq = pq[:popqa_n]
+    pq = [(sg, q, a) for sg, q, a, _ in popqa_eval_items(load_popqa(), pq_sg, n=popqa_n)]
+
+    def summaries_for(items: list[tuple], budget: int) -> dict[str, str]:
+        """One <= budget-token summary per unique entity (cached greedy generation)."""
+        uniq: dict[str, tuple[str, str]] = {}
+        for sg, _, _ in items:
+            if sg.center.qid not in uniq:
+                label = sg.center.label or sg.center.qid
+                uniq[sg.center.qid] = summary_prompt(verbalize(sg), label, budget)
+        qids = list(uniq)
+        texts = chat.generate_batch(
+            [uniq[q] for q in qids], max_new_tokens=budget, batch_size=64
+        )
+        return dict(zip(qids, texts, strict=True))
+
+    def facts_at(items: list[tuple], budget: int) -> list[str]:
+        if budget == 0:
+            return ["" for _ in items]
+        if retrieval == "summary":
+            by_qid = summaries_for(items, budget)
+            return [by_qid[sg.center.qid] for sg, _, _ in items]
+        if retrieval == "question":
+            if backbone is None:  # narrowed for ty; construction above guarantees it
+                raise RuntimeError("question retrieval requires the backbone embedder")
+            return [
+                verbalize_budgeted(
+                    rank_edges_by_question(sg, q, backbone.embed_labels),
+                    chat.count_tokens, budget,
+                )
+                for sg, q, _ in items
+            ]
+        return [verbalize_budgeted(sg, chat.count_tokens, budget) for sg, _, _ in items]
 
     def curve(items: list[tuple], tag: str) -> list[dict]:
-        rprint(f"[bold]RAG-budget — {tag}[/] (n={len(items)}):")
+        rprint(f"[bold]RAG-budget — {tag} — retrieval={retrieval}[/] (n={len(items)}):")
         rprint(f"  {'budget':>7} {'acc':>7} {'med_tokens':>11}")
         rows_out = []
         for b in budget_list:
-            facts = ["" if b == 0 else verbalize_budgeted(sg, chat.count_tokens, b)
-                     for sg, _, _ in items]
+            facts = facts_at(items, b)
             prompts = [cftrain_prompt(q, f or None)
                        for (_, q, _), f in zip(items, facts, strict=True)]
             gen = chat.generate_batch_ids(prompts, max_new_tokens=32, batch_size=64)
             preds = [chat.decode(g) for g in gen]
-            ok = sum(answer_ok(p, ans) for p, (_, _, ans) in zip(preds, items, strict=True))
-            acc = ok / len(items)
+            correct = [answer_ok(p, ans) for p, (_, _, ans) in zip(preds, items, strict=True)]
+            acc = sum(correct) / len(items)
             med = sorted(chat.count_tokens(f) for f in facts)[len(facts) // 2]
             rprint(f"  {b:>7} {acc:>7.1%} {med:>11}")
-            rows_out.append({"budget": b, "acc": round(acc, 4), "median_knowledge_tokens": med})
+            rows_out.append({
+                "budget": b, "acc": round(acc, 4), "median_knowledge_tokens": med,
+                "correct": [int(c) for c in correct],  # per-item, paired vs eval-final dumps
+            })
         return rows_out
 
-    report = {"held_out": curve(ho, "held-out"), "popqa": curve(pq, "PopQA (unseen)"),
-              "model": model, "dataset": dataset}
+    report = {
+        "held_out": curve(ho, "held-out"), "popqa": curve(pq, "PopQA (unseen)"),
+        "model": model, "dataset": dataset, "retrieval": retrieval,
+        "split": {"split_mode": split_mode, "split_seed": split_seed, "val_frac": val_frac},
+        "held_out_items": [
+            {"subject_qid": sg.center.qid, "question": q} for sg, q, _ in ho
+        ],
+        "popqa_items": [{"subject_qid": sg.center.qid, "question": q} for sg, q, _ in pq],
+    }
     if out:
         Path(out).write_text(json.dumps(report, indent=2))
         rprint(f"[green]wrote[/] {out}")

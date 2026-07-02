@@ -512,6 +512,36 @@ this base and report mean±std over ≥3 seeds; an effect counts only if it clea
   --grad-accum 2`), `before_entity` placement (F9), d1024/L4, k per the curve (F2/F11); HPs lr 1e-4,
   schedule constant, weight-decay 0.01, warmup-frac 0.05; `--no-cache-teacher`; checkpoint-selected on
   best held-out. This is the config all Phase-C/D numbers come from.
+- **M7 — Eval-methodology overhaul (2026-07-02; external review).** Four defects in the evaluation
+  protocol were identified and fixed; every pre-M7 accuracy carries them and the headline numbers
+  are re-derived by `eval-final` (see the F12 correction):
+  1. **Seed-coupled eval sampling.** Held-out and PopQA eval subsets were sampled with the
+     *training* seed (from an RNG whose state also depended on unrelated earlier draws), so each
+     seed/config scored a *different* n=200 sample. Across-seed std therefore mixed model variance
+     with eval-set sampling noise (~3.5 pt binomial at n=200), and no paired comparisons were
+     possible. FIX: all eval sampling now uses one fixed seed (`eval/evalsets.py`,
+     `EVAL_SAMPLE_SEED`); smaller-n samples are prefixes of larger-n ones.
+  2. **Tiny PopQA subsets.** n=200 of 14,267 questions. FIX: `eval-final` scores the FULL
+     benchmark (binomial noise ~0.4 pt) and additionally reports the official PopQA metric for
+     literature comparability. Per-item dumps + `eval/stats.py` (Wilson CIs, exact McNemar,
+     paired bootstrap) replace bare point estimates.
+  3. **Selection bias on held-out.** Best-checkpoint selection used the same n=200 held-out sample
+     that was then reported (max over ~10 noisy evals inflates the reported number). FIX:
+     `eval-final` re-scores selected checkpoints on a larger, disjointly-sampled strict set;
+     selection during training still uses the (now-frozen) trajectory sample, which no longer
+     overlaps the definitive one beyond its prefix.
+  4. **Paraphrase leakage in "held-out".** The question-level split let paraphrases of the same
+     (entity, fact) straddle train/val — measured at seed 0 on 100k: **32.8% of answerable val
+     rows share a fact with a train row**. So legacy "held-out" partly measured paraphrase
+     robustness. FIX: `split_by_held_out_facts` (new default, groups by `fact_key`) for new runs;
+     `strict_val_subset` filters legacy checkpoints' val sets at eval time (equivalent to having
+     grouped upfront).
+  Also: the RAG-budget baseline gained `--retrieval question|summary` modes (query-aware
+  retrieval + LLM-written budgeted summary) so the token-efficiency figure is not a
+  query-independent-truncation strawman, and an untrained top-k mean-edge-embedding injection
+  baseline (`eval-untrained-injection`) isolates what the *trained* encoder adds. Checkpoints now
+  record their split provenance (`meta` in the blob); `eval-final` reconstructs legacy splits
+  from the stored training seed.
 
 ---
 
@@ -606,6 +636,51 @@ Phase C (group `phaseC-kfamily-100k`). Until then, do NOT quote a converged 100k
 ---
 
 ## Finding 12 — Scale-up (100k) forces graph-learning over memorization: PopQA ~2.25× (held-out flat)
+
+> ✅ **CORRECTED (M7 protocol, 2026-07-02) — the table below is SUPERSEDED; cite the corrected
+> block that follows.** All 18 k-family checkpoints re-scored by `eval-final` on FULL PopQA
+> (n=14,266, both the corrected word-boundary metric and the official PopQA metric) and the
+> STRICT (fact-leakage-free) held-out set (n=2,000, frozen fixed-seed sample). Source:
+> `data/analysis/eval_final/<ckpt>/summary.json` + per-item jsonl; aggregate =
+> `scripts/aggregate_eval_final.py --out data/analysis/kfamily_corrected.json`.
+>
+> **CORRECTED k-family (3 seeds each; mean +/- std over seeds; per-seed values in the JSON):**
+>
+> | k | held-out strict | PopQA (full, word-boundary) | PopQA (official) |
+> |--:|---|---|---|
+> | 1 | 0.298 +/- 0.006 | 0.203 +/- 0.008 | 0.207 +/- 0.009 |
+> | 2 | 0.340 +/- 0.023 | 0.298 +/- 0.075 | 0.303 +/- 0.077 |
+> | 4 | 0.441 +/- 0.007 | 0.412 +/- 0.023 | 0.419 +/- 0.024 |
+> | 8 | 0.545 +/- 0.014 | 0.477 +/- 0.002 | 0.483 +/- 0.002 |
+> | 16 | 0.594 +/- 0.024 | 0.518 +/- 0.020 | 0.523 +/- 0.021 |
+> | 32 | 0.610 +/- 0.011 | 0.537 +/- 0.010 | 0.543 +/- 0.010 |
+>
+> Brackets (frozen model, full PopQA): base **0.103**, RAG (answer-guaranteed facts) **0.960**.
+>
+> **What changed vs the superseded table:**
+> 1. **Seed-std collapsed** (k8 PopQA std 4.2 pt -> 0.2 pt): the old spread was mostly n=200
+>    eval sampling noise, exactly as the M7 analysis predicted. The model is far more
+>    seed-stable than the old protocol could see.
+> 2. **"Plateau at k16" REFUTED.** Paired exact McNemar on the shared full-PopQA items
+>    (seed-0): every adjacent contrast is significant, including k16 vs k32 (c=1562 vs b=924,
+>    p ~ 9e-38). The curve is monotone through k32 with diminishing per-token returns; k8
+>    already buys ~89% of k32's PopQA at 1/4 the tokens. "Best k" remains a token-cost trade
+>    (k8 efficiency vs k32 peak), NOT a capacity ceiling in the tested range.
+> 3. **Held-out dropped 2-4 pt everywhere** (selection bias + the 32.8% paraphrase leakage
+>    removed); ordering unchanged.
+> 4. **Scale-up (10k -> 100k) CORRECTED to ~2.05x on identical eval sets:** 10k-corpus k8
+>    (`p25_eff32_s{0,1,2}` via eval-final, same full PopQA): **0.232 +/- 0.011** -> 100k k8
+>    **0.477 +/- 0.002**. NEW: strict held-out ALSO rises with scale (0.453 -> 0.545, +9.2 pt) —
+>    the old "held-out flat across scales" read was an artifact of leakage inflating the
+>    25-epoch 10k runs more than the 4-epoch 100k runs. Scale now cleanly improves BOTH axes.
+> 5. **Untrained-injection control (NEW, `eval-untrained-injection`):** top-k mean edge
+>    embeddings in the same slots: PopQA **0.130** (k8; k16 identical), barely above base
+>    0.103, vs trained k8 0.477. The learned encoder accounts for ~93% of the injected-knowledge
+>    effect; more untrained slots add nothing.
+> 6. **RAG baselines strengthened (3 retrieval modes, same frozen sets):** at <=32 knowledge
+>    tokens concepts beat top-PageRank truncation AND question-aware retrieval AND LLM-written
+>    budgeted summaries (e.g. @16 tokens PopQA: concept 0.518 vs 0.113/0.243/0.157); text
+>    catches up only at ~64-128 tokens. The efficiency claim survives non-strawman baselines.
 
 > 🟡 **STRONG SIGNAL; k4/8/16 at 3 SEEDS, k1/2/32 at 1 (Phase C + C2, group `phaseC-kfamily-100k`).**
 > Converged 100k k-family (100k steps ≈ 4 epochs, best-held-out checkpoint, locked config + HPs).

@@ -158,6 +158,18 @@ benefit, ~2× slower → cached teacher), **F4** (24k is *undertrained*; converg
 placement (3.4) on the locked base; update findings with error bars (3.5); assemble best-model
 recipe (4.1); decide the 100k-entity scale-up (4.2). Live plan + status in `TODO.md`.
 
+**M7 eval overhaul (2026-07-02) — supersedes all pre-M7 accuracies.** Eval sampling is now
+decoupled from the training seed (`eval/evalsets.py`, fixed `EVAL_SAMPLE_SEED`; smaller samples
+are prefixes of larger ones → everything pairs); held-out splits group by **fact** (paraphrase
+leakage was 32.8%!); definitive numbers come from **`eval-final`** (FULL PopQA n=14,266 + strict
+held-out, Wilson CIs, per-item dumps) with paired tests in `eval/stats.py`; baselines:
+`eval-untrained-injection` (near-floor → the encoder is the effect) and 3-mode
+`cf-rag-budget-curve`. Corrected headlines: k8 PopQA **0.477±0.002** (base 0.103, RAG 0.960),
+scale-up 10k→100k **2.05×** on identical sets, k-curve monotone through k32 (old "k16 plateau"
+was n=200 noise), old 4–8-pt seed spreads were mostly eval sampling noise. Positioning + niche:
+`docs/RELATED_WORK.md` (closest: xRAG/KBLaM/Knowledge-Prompts/GNP; grant lead = scaling laws of
+knowledge injection). Never quote a pre-M7 number in the paper.
+
 ## Coding guidelines (publication-grade open source)
 - **Gate is non-negotiable:** `ruff check`, `ty check`, and `pytest -q -m "not integration"` all
   green before any commit. Line length **100**; **ASCII only** in source (ruff RUF flags en-dash, ×,

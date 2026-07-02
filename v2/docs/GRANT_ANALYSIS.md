@@ -15,74 +15,105 @@ Wikidata entities; snapshot sha `ee4850f...`). Locked config (F8): gate-none + g
 generate the answer, not merely rank it). Three axes: **held-out** (unseen questions, trained entities),
 **held-in** (overfit gauge), **PopQA** (unseen *entities* — the honest headline).
 
+**Evaluation protocol (M7-corrected, 2026-07-02).** All numbers below come from the hardened
+protocol (RESEARCH_FINDINGS **M7** + corrected F12): **FULL PopQA** (n=14,266; binomial noise
+~0.4 pt; official + corrected metrics), **strict held-out** (fact-leakage-free: 32.8% of the
+legacy val rows shared a fact with a training paraphrase and are excluded; n=2,000 frozen
+fixed-seed sample), Wilson CIs, and **paired exact McNemar** on shared items for contrasts.
+Every number is traceable to `data/analysis/eval_final/<ckpt>/summary.json` (+ per-item jsonl).
+
 ---
 
 ## 1. Headline: token efficiency (the paper's central claim)
 
 **Figure:** `data/analysis/token_efficiency.png` (rendered by `scripts/phaseF_token_efficiency_figure.py`).
 
-ConceptFormer spends **k soft tokens**; text-RAG spends however many fact tokens fit the budget
-(median ~100 for a full 1-hop neighborhood, F2). Plotted on a shared knowledge-token axis:
+ConceptFormer spends **k soft tokens**; the text baselines spend however many fact tokens fit the
+budget (median ~100 for a full 1-hop neighborhood, F2). To pre-empt the "strawman baseline"
+objection, text-RAG is measured under **three retrieval modes** on the same frozen eval sets:
+query-independent top-PageRank truncation, **question-AWARE retrieval** (facts ranked by
+embedding similarity to the question), and **LLM-written budgeted summaries** (query-independent
+compression, enforced by max-new-tokens). Concept numbers = corrected F12 (3-seed means).
 
-| knowledge tokens | ConceptFormer held-out | text-RAG held-out | ConceptFormer PopQA | text-RAG PopQA |
-|--:|--:|--:|--:|--:|
-| ~1 (k1)  | **0.318** | -    | **0.227** | -    |
-| ~8 (k8)  | **0.580** | 0.123 | **0.495** | 0.093 |
-| ~16 (k16)| **0.643** | 0.237 | **0.520** | 0.170 |
-| ~32 (k32)| **0.647** | 0.397 | **0.533** | 0.303 |
-| ~64      | -    | 0.717 | -    | 0.620 |
-| ~100     | -    | 0.913 | -    | 0.833 |
+| tokens | concept held-out | text held-out (pgrk / q-aware / summary) | concept PopQA | text PopQA (pgrk / q-aware / summary) |
+|--:|--:|---|--:|---|
+| 8   | **0.545** | 0.117 / 0.117 / 0.207 | **0.477** | 0.073 / 0.073 / 0.147 |
+| 16  | **0.594** | 0.180 / 0.220 / 0.290 | **0.518** | 0.113 / 0.243 / 0.157 |
+| 32  | **0.610** | 0.343 / 0.460 / 0.423 | **0.537** | 0.233 / 0.387 / 0.333 |
+| 64  | -         | 0.647 / 0.710 / 0.647 | -         | 0.607 / 0.720 / 0.613 |
+| 128 | -         | 0.903 / 0.853 / 0.787 | -         | 0.850 / 0.840 / 0.777 |
 
-**Read.** In the **low-token regime (<=32 tokens)** ConceptFormer dominates: at 8 tokens it beats
-text-RAG **~4.7x** on held-out and **~5.3x** on PopQA. text-RAG only overtakes once it can spend
-~60-100 tokens (a full verbalized neighborhood). So concepts buy **RAG-level knowledge at roughly
-one-sixth the token cost** — the core efficiency thesis, now on a modern LLM with a strict metric.
-(RAG here is the *realistic* `verbalize_budgeted` top-PageRank truncation with **no** answer guarantee;
-the answer-guaranteed teacher would sit near-ceiling at every budget and rig the comparison.)
+**Read.** In the **low-token regime (<=32 tokens)** concepts dominate ALL three text baselines:
+at 8 tokens, **2.6x** the best text baseline on held-out and **3.2x** on PopQA; at matched
+accuracy, even question-aware retrieval needs **~5-6x more tokens** to reach concept-k8 level.
+Text catches up only at ~64-128 tokens (most of a verbalized neighborhood). The efficiency
+thesis survives non-strawman baselines — and the **untrained-injection control** (Sec 3b) shows
+the effect is the *trained encoder*, not the injection slots.
 
-**Re-verify:** `cf-rag-budget-curve` -> `data/analysis/rag_budget_curve.json`; concept curve = F12.
+**Re-verify:** `cf-rag-budget-curve --retrieval pagerank|question|summary` ->
+`data/analysis/rag_budget_curve_{mode}.json`; concept curve = corrected F12
+(`data/analysis/kfamily_corrected.json`).
 
 ---
 
-## 2. The k-curve and the knee (capacity vs cost)
+## 2. The k-curve (capacity vs cost) — corrected
 
-Converged 100k, 3-seed mean +/- std (F12):
+Converged 100k, 3-seed mean +/- std, M7 protocol (strict held-out n=2,000; FULL PopQA n=14,266):
 
-| k | held-out | PopQA (unseen) |
+| k | held-out (strict) | PopQA (unseen, full) |
 |--:|--:|--:|
-| 1  | 0.318 +/- 2.3 | 0.227 +/- 1.0 |
-| 2  | 0.387 +/- 3.8 | 0.320 +/- 7.8 |
-| 4  | 0.472 +/- 2.8 | 0.442 +/- 4.0 |
-| 8  | 0.580 +/- 0.8 | 0.495 +/- 4.2 |
-| 16 | **0.643 +/- 4.8** | 0.520 +/- 0.4 |
-| 32 | 0.647 +/- 4.3 | 0.533 +/- 2.7 |
+| 1  | 0.298 +/- 0.006 | 0.203 +/- 0.008 |
+| 2  | 0.340 +/- 0.023 | 0.298 +/- 0.075 |
+| 4  | 0.441 +/- 0.007 | 0.412 +/- 0.023 |
+| 8  | 0.545 +/- 0.014 | 0.477 +/- 0.002 |
+| 16 | 0.594 +/- 0.024 | 0.518 +/- 0.020 |
+| 32 | **0.610 +/- 0.011** | **0.537 +/- 0.010** |
 
-**Knee at ~k16**, then a plateau (k16 ~ k32: +0.4 pt held-out for 2x the tokens). **PopQA flattens
-even earlier** (k8 0.495 already ~95% of the k32 0.533). So the recipe trade is **k8 (cheapest strong)
-vs k16 (peak held-out)**; PopQA barely cares past k8. k16 is still 6.3x compression vs ~100 fact tokens.
+The curve is **monotone through k32** — paired exact McNemar on shared full-PopQA items makes
+every adjacent step significant (k16 vs k32: p ~ 9e-38; the old "plateau at k16" was an n=200
+artifact). Returns diminish per token: **k8 already delivers ~89% of k32's PopQA at 1/4 the
+tokens** (12.5x compression vs ~100 fact tokens). "Best k" is a genuine token-cost trade (k8
+efficiency vs k32 peak), not a capacity ceiling — which also means **larger k budgets remain an
+open scaling lever**. Note the seed-stability: with eval noise removed, per-config std is
+0.2-2.4 pt (the old 4-8 pt spreads were mostly measurement noise).
 
 ---
 
 ## 3. Generalization to unseen entities (the honest axis) — and that scale is the lever
 
 The claim that separates "learned the graph" from "memorized the corpus" is **PopQA (entities never
-trained on)**. Data scale moved it hard:
+trained on)**. Data scale moved it hard — now measured on **identical full-PopQA eval sets** for
+both corpus sizes (10k-corpus checkpoints re-scored by the same `eval-final` protocol):
 
-- **PopQA jumps ~2.25x from the 10k to the 100k corpus** (k8 ~0.22 -> 0.495; F12/F7).
-- Simultaneously **per-entity overfit FELL** (k8 held-in ~0.82 -> ~0.64) — the model **stopped
-  memorizing training entities** and learned the edge->concept mapping. Held-out (trained entities)
-  barely moved with scale; the win is concentrated on **unseen entities**, exactly as graph-learning
-  (not memorization) predicts.
+- **PopQA jumps ~2.05x from the 10k to the 100k corpus**: k8 **0.232 +/- 0.011 -> 0.477 +/- 0.002**
+  (3 seeds each, n=14,266, CI ~+/-0.8 pt). Base bracket 0.103, RAG bracket 0.960.
+- **NEW under the strict protocol: held-out ALSO rises with scale** (0.453 -> 0.545, +9.2 pt).
+  The old "held-out flat across scales" read was a leakage artifact (paraphrase leakage inflated
+  the 25-epoch 10k runs more than the 4-epoch 100k runs). Scale cleanly improves BOTH axes.
+- Per-entity overfit still FELL with scale (k8 held-in ~0.82 -> ~0.64, F12) — less memorization,
+  more edge->concept mapping.
 - **The curve is still climbing at 100k** (k8 crept 0.525 -> 0.570 over the last 10k steps; F11/F12).
 
 **This is the grant argument in one line:** the generalization axis we care about improves with data
 scale and has **not plateaued** at 100k — more compute (300k -> 1M) is the direct next lever.
 
+## 3b. The trained encoder is the effect (untrained-injection control)
+
+Filling the same k slots with **untrained** top-k mean edge embeddings (`eval-untrained-injection`,
+same frozen eval sets) yields PopQA **0.130** (k8; k16 identical, 0.130) vs base 0.103 — barely
+above no knowledge — while the trained k8 encoder reaches **0.477**. The learned graph->concept
+mapping accounts for **~93% of the injected-knowledge effect**, and extra untrained slots add
+nothing. Knowledge injection here is not an artifact of splicing entity-related vectors; it is
+the trained compression.
+
 ---
 
 ## 4. It reads the graph (causal proof), and faithfulness scales with k
 
-Counterfactual graph interventions on each k-model (F13, `cf-graph-faithfulness`, 400 probes each):
+Counterfactual graph interventions on each k-model (F13, `cf-graph-faithfulness`, 400 probes each).
+*(Protocol note: F13/F15 predate M7 but are within-item interventions — each probe compares the
+same question under perturbed vs unperturbed graphs — so the M7 sampling defects do not bias the
+deltas; only the absolute "concept correct" column carries the old caveats.)*
 
 | k | concept acc | base-only | ablate-ANSWER (LOW=good) | ablate-OTHER (HIGH=good) | swap-follow->FALSE | stick-to-orig |
 |--:|--:|--:|--:|--:|--:|--:|
@@ -148,13 +179,47 @@ scaling curve F12 shows is still climbing.
 
 ## 7. Bottom line for the application
 
-1. **Efficient:** RAG-level knowledge at ~6x fewer tokens; dominates the low-token regime (Sec 1).
-2. **Generalizes to unseen entities** — the honest axis — and improves ~2.25x with data scale (Sec 3).
-3. **Reads the graph** (causal swap/ablation proof), with faithfulness growing with k (Sec 4).
-4. **Doesn't break the frozen model** (capability preserved, Sec 5).
-5. **Modernizes and reproduces v1** on a harder, stricter setup (Sec 6).
-6. **The remaining unlock is scale:** 100k has not plateaued on PopQA. The grant funds 300k -> 1M.
+1. **Efficient:** beats query-aware retrieval and LLM summaries 2.6-3.2x at 8 tokens; matched
+   accuracy needs ~5-6x more text tokens (Sec 1) — measured against non-strawman baselines.
+2. **Generalizes to unseen entities** — the honest axis — improving **2.05x** with a 10x data
+   scale on identical full-benchmark eval sets, with held-out rising too (Sec 3).
+3. **The trained encoder IS the effect** — untrained injection is near-floor (Sec 3b).
+4. **Reads the graph** (causal swap/ablation proof), with faithfulness growing with k (Sec 4).
+5. **Doesn't break the frozen model** (capability preserved, Sec 5).
+6. **Modernizes and reproduces v1** on a harder, stricter setup (Sec 6).
+7. **The remaining unlock is scale:** 100k has not plateaued on PopQA, and the k-curve is still
+   monotone at k32. The grant funds the scaling surface (Sec 8).
 
 **Immediate next experiment (the go/no-go):** train one k16 (or k8) model, one seed, on the built
 **300k** corpus (`cftrain_qa_300k`, 2.41M rows) and confirm PopQA continues to climb from the 100k
-point. If it does, the 1M scale-up is justified.
+point — now decisively measurable (full-PopQA eval, CI ~+/-0.8 pt; a >2-pt rise is conclusive).
+If it climbs, the 1M scale-up is justified.
+
+---
+
+## 8. Research niche and positioning (from the 2026-07-02 literature sweep)
+
+Full analysis with per-paper differentiation: **`docs/RELATED_WORK.md`**. The one-paragraph
+version for the application:
+
+**Positioning.** No prior work combines an *amortized, inductive* encoder producing *k
+query-independent soft tokens per KG entity*, trained *label-free* by *same-model KL
+self-distillation*, evaluated on *unseen entities* and by *causal graph interventions*, at
+*100k+ entity scale*. Closest neighbors, each missing several of these: xRAG (2405.13792,
+retriever-vector bridge, 1 token, no learned compression, no entity axis), KBLaM (2410.10450,
+per-triple KV pairs via attention surgery, synthetic KBs only), Knowledge Prompts (2210.04726,
+per-entity lookup-table prompts at 1.1M entities but zero unseen-entity capability), GNP/
+GraphToken (2309.15427 / 2402.05862, per-question GNN encoders, task-CE, no precompute). 2026
+meta-work (GTEval 2605.03514; "When Graph Tokens Sink" 2606.03712) explicitly identifies the
+faithfulness deficiency our counterfactual protocol measures.
+
+**The proposed niche: scaling laws of knowledge injection into frozen LLMs.** A 2D measurement
+surface — training entities (10k -> 100k -> 300k -> 1M) x frozen backbone size (Qwen3 0.6B ->
+32B) — with unseen-entity generalization and causal faithfulness as response variables. Both
+marginals are empty niches (no injection-vs-LLM-scale study within one family exists; no
+data-scaling law for knowledge encoders exists), our existing results are the surface's first
+measured points, and it connects to the knowledge-capacity-laws (2404.05405) and
+encode-vs-recall (2602.14080) conversations. Secondary bounded aim: injecting concept tokens
+through a VLM's continuous-token (image) interface (unoccupied; honest framing in
+RELATED_WORK.md Sec 5). The compute ask maps 1:1 onto this surface: bigger teachers x more
+entities, embarrassingly parallel — exactly what 2x 24 GB consumer GPUs cannot provide.

@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from torch import Tensor
+from torch import Tensor, nn
 
 from conceptformer.generate.signal import answer_ok
 from conceptformer.generate.teacher import TEACHER_SYSTEM
@@ -35,7 +35,7 @@ from conceptformer.model.featurizer import (
     collate_features,
     featurize_subgraph,
 )
-from conceptformer.model.injection import build_position_ids, pack_embeddings
+from conceptformer.model.injection import ConceptGate, build_position_ids, pack_embeddings
 from conceptformer.schemas import Subgraph
 from conceptformer.train.forcing import gather_path_logits
 from conceptformer.train.losses import sequence_cross_entropy, sequence_kl
@@ -209,7 +209,9 @@ class EvalSet:
 class ConceptTrainer:
     """Holds the frozen backbone + trainable ConceptFormer and runs distillation steps."""
 
-    def __init__(self, backbone: Backbone, config: TrainConfig) -> None:
+    def __init__(
+        self, backbone: Backbone, config: TrainConfig, concept_model: nn.Module | None = None
+    ) -> None:
         self.bb = backbone
         self.cfg = config
         # Seed torch BEFORE building the encoder: its weight init draws from torch's global RNG, so
@@ -220,30 +222,37 @@ class ConceptTrainer:
         torch.manual_seed(config.seed)
         torch.cuda.manual_seed_all(config.seed)
         d_in = 2 * backbone.d_model  # concat(property, neighbor) edge features
-        self.model = ConceptFormer(
-            d_in,
-            backbone.d_model,
-            config.k,
-            d_model=config.d_model,
-            n_layers=config.n_layers,
-            n_heads=config.n_heads,
-            dropout=config.dropout,
-            gate_mode=config.gate_mode,
+        # ``concept_model`` swaps in an alternative concept producer with the same forward
+        # signature — e.g. the untrained TopKMeanEdgeBaseline (eval-only, zero params) — so
+        # baselines reuse the exact splice/generate/eval path the trained encoder goes through.
+        self.model: nn.Module = (
+            concept_model
+            if concept_model is not None
+            else ConceptFormer(
+                d_in,
+                backbone.d_model,
+                config.k,
+                d_model=config.d_model,
+                n_layers=config.n_layers,
+                n_heads=config.n_heads,
+                dropout=config.dropout,
+                gate_mode=config.gate_mode,
+            )
         ).to(backbone.device)
         self.model.train()
         # The gate gets its own (higher) LR: with a shared 1e-4 it stays near 0, which zeroes the
         # gradient to the encoder (grad ∝ tanh(gate)) — a dead zone where nothing learns.
-        groups: list[dict] = [
-            {"params": self.model.encoder.parameters(), "lr": config.lr, "name": "encoder"}
-        ]
-        if self.model.gate is not None:
-            groups.append(
-                {"params": self.model.gate.parameters(), "lr": config.gate_lr, "name": "gate"}
-            )
-        self.opt = torch.optim.AdamW(groups, weight_decay=config.weight_decay)
+        groups: list[dict] = []
+        encoder = getattr(self.model, "encoder", None)
+        if encoder is not None:
+            groups.append({"params": encoder.parameters(), "lr": config.lr, "name": "encoder"})
+        gate = getattr(self.model, "gate", None)
+        if gate is not None:
+            groups.append({"params": gate.parameters(), "lr": config.gate_lr, "name": "gate"})
+        self.opt = torch.optim.AdamW(groups, weight_decay=config.weight_decay) if groups else None
         self.sched = (
             torch.optim.lr_scheduler.LambdaLR(self.opt, self._lr_factor)
-            if config.total_steps > 0
+            if self.opt is not None and config.total_steps > 0
             else None
         )
         # Deterministic-preprocessing caches (populated by prepare()): per-entity edge features and
@@ -266,6 +275,13 @@ class ConceptTrainer:
         # Cache of frozen base/teacher PopQA brackets per item-set (so a per-checkpoint PopQA
         # trajectory only re-runs the student). Keyed by id(items).
         self._popqa_brackets: dict[int, tuple[float, float]] = {}
+
+    @property
+    def optimizer(self) -> torch.optim.AdamW:
+        """The training optimizer, narrowed; raises for eval-only trainers (zero-param models)."""
+        if self.opt is None:
+            raise RuntimeError("trainer has no trainable parameters (eval-only concept model)")
+        return self.opt
 
     def _lr_factor(self, step: int) -> float:
         """LR multiplier at ``step`` for this run's schedule (see module-level ``lr_factor``)."""
@@ -489,7 +505,7 @@ class ConceptTrainer:
         # Always record the pre-clip total grad-norm (a key instability signal); clip if enabled.
         clip = self.cfg.grad_clip if self.cfg.grad_clip > 0 else float("inf")
         self.last_grad_norm = float(torch.nn.utils.clip_grad_norm_(self.model.parameters(), clip))
-        self.opt.step()
+        self.optimizer.step()
         if self.sched is not None:
             self.sched.step()
         if self._ema is not None:
@@ -500,7 +516,7 @@ class ConceptTrainer:
                         self._ema[n].mul_(d).add_(p.detach(), alpha=1.0 - d)
 
     def _apply(self, loss: Tensor) -> float:
-        self.opt.zero_grad()
+        self.optimizer.zero_grad()
         loss.backward()
         self._optimizer_step()
         return float(loss.detach())
@@ -517,7 +533,7 @@ class ConceptTrainer:
         same trade-off every framework's grad-accum makes. Losses are computed and freed one
         micro-batch at a time, so peak memory stays at one batch (batch 64 OOMs as one forward).
         """
-        self.opt.zero_grad()
+        self.optimizer.zero_grad()
         n = len(micro_batches)
         total = 0.0
         for mb in micro_batches:
@@ -761,21 +777,31 @@ class ConceptTrainer:
             "n": len(items),
         }
 
-    def save_checkpoint(self, path: Path) -> None:
-        """Persist the trainable ConceptFormer + config (the EMA weights when EMA is on)."""
+    def save_checkpoint(self, path: Path, meta: dict | None = None) -> None:
+        """Persist the trainable ConceptFormer + config (the EMA weights when EMA is on).
+
+        ``meta`` records run facts the TrainConfig doesn't carry but re-evaluation must
+        reconstruct exactly — the split mode/seed/fraction (eval-final rebuilds the checkpoint's
+        train/val split from it; absent = legacy question-level split with the training seed).
+        """
         from dataclasses import asdict
 
         path.parent.mkdir(parents=True, exist_ok=True)
         with self._eval_weights():
             state = {n: p.detach().cpu().clone() for n, p in self.model.state_dict().items()}
-        torch.save({"model": state, "config": asdict(self.cfg)}, path)
+        blob: dict = {"model": state, "config": asdict(self.cfg)}
+        if meta:
+            blob["meta"] = meta
+        torch.save(blob, path)
 
     def gate_values(self) -> list[float]:
-        return self.model.gate.gate_values().cpu().tolist() if self.model.gate is not None else []
+        gate = getattr(self.model, "gate", None)
+        return gate.gate_values().cpu().tolist() if isinstance(gate, ConceptGate) else []
 
     def raw_gate(self) -> list[float]:
         """Pre-tanh gate parameters (to see whether the gate is actually opening)."""
-        return self.model.gate.gate.detach().cpu().tolist() if self.model.gate is not None else []
+        gate = getattr(self.model, "gate", None)
+        return gate.gate.detach().cpu().tolist() if isinstance(gate, ConceptGate) else []
 
     @torch.no_grad()
     def concept_norm(self, sg: Subgraph) -> float:
