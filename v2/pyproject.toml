@@ -39,6 +39,10 @@ infer = [
     "accelerate>=0.30",
     "wandb>=0.18",
 ]
+# Plotting for paper/grant figures. Kept out of infer so GPU installs stay lean.
+viz = [
+    "matplotlib>=3.8",
+]
 
 [build-system]
 requires = ["hatchling"]

@@ -64,6 +64,21 @@ def _chunks(seq: list, size: int) -> list[list]:
     return [seq[i : i + size] for i in range(0, len(seq), size)]
 
 
+def lr_factor(step: int, warmup: int, total: int, schedule: str) -> float:
+    """LR multiplier at ``step``: linear warmup, then ``schedule`` decay (cosine or constant).
+
+    Pure (no trainer state) so the schedule shape is unit-testable without a model. ``constant``
+    holds the peak LR after warmup — useful in the few-epoch large-data regime where cosine-to-zero
+    over a short horizon decays the LR away before the data is even seen once.
+    """
+    if step < warmup:
+        return (step + 1) / max(1, warmup)
+    if schedule == "constant":
+        return 1.0
+    progress = (step - warmup) / max(1, total - warmup)
+    return 0.5 * (1.0 + math.cos(math.pi * min(1.0, progress)))
+
+
 def split_microbatches(items: list, n: int) -> list[list]:
     """Split ``items`` into ``n`` micro-batches for gradient accumulation.
 
@@ -111,9 +126,11 @@ class TrainConfig:
     gate_lr: float = 1e-2  # the zero-init gate must open fast or it throttles all learning
     temperature: float = 1.0
     ce_weight: float = 0.0  # optional hard-CE factuality anchor (ablate; 0 = pure KL)
+    weight_decay: float = 0.01  # AdamW decoupled wd; 0.01 is AdamW's default (kept for parity)
     rag_context_tokens: int = 2048
-    warmup_steps: int = 0  # >0 with total_steps enables linear warmup + cosine decay
+    warmup_steps: int = 0  # >0 with total_steps enables linear warmup + the chosen schedule decay
     total_steps: int = 0
+    schedule: str = "cosine"  # post-warmup LR decay: "cosine" (to 0) or "constant" (hold peak)
     # Cache the frozen teacher's path hidden states (~m*d/example) so the step skips the teacher
     # forward. A big win for small data x many epochs (high reuse); set False for large-data /
     # few-epoch runs where the teacher is computed ~once anyway and the cache would be huge.
@@ -223,7 +240,7 @@ class ConceptTrainer:
             groups.append(
                 {"params": self.model.gate.parameters(), "lr": config.gate_lr, "name": "gate"}
             )
-        self.opt = torch.optim.AdamW(groups)
+        self.opt = torch.optim.AdamW(groups, weight_decay=config.weight_decay)
         self.sched = (
             torch.optim.lr_scheduler.LambdaLR(self.opt, self._lr_factor)
             if config.total_steps > 0
@@ -251,12 +268,8 @@ class ConceptTrainer:
         self._popqa_brackets: dict[int, tuple[float, float]] = {}
 
     def _lr_factor(self, step: int) -> float:
-        """Linear warmup then cosine decay (multiplies each param group's base LR)."""
-        warmup, total = self.cfg.warmup_steps, self.cfg.total_steps
-        if step < warmup:
-            return (step + 1) / max(1, warmup)
-        progress = (step - warmup) / max(1, total - warmup)
-        return 0.5 * (1.0 + math.cos(math.pi * min(1.0, progress)))
+        """LR multiplier at ``step`` for this run's schedule (see module-level ``lr_factor``)."""
+        return lr_factor(step, self.cfg.warmup_steps, self.cfg.total_steps, self.cfg.schedule)
 
     def _count_tokens(self, text: str) -> int:
         return len(self.bb.tokenizer.encode(text, add_special_tokens=False))

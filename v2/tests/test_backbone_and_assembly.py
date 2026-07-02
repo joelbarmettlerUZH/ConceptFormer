@@ -44,6 +44,7 @@ def test_conceptformer_is_zero_at_init_then_trainable():
     assert out.shape == (2, 4, 24)
     assert torch.count_nonzero(out) == 0  # gate=0 → concepts==0 → student == frozen model at init
     # after nudging the gate open, concepts become non-zero and depend on the neighborhood
+    assert cf.gate is not None  # default gate_mode="tanh" builds a ConceptGate
     with torch.no_grad():
         cf.gate.gate.fill_(1.0)
     assert torch.count_nonzero(cf(feats, mask)) > 0

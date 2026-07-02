@@ -11,9 +11,18 @@ per-position teacher distributions are recomputed live from the frozen model dur
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Sequence
 
 from conceptformer.generate.schema import CFTrainQA
+
+
+def teacher_path_key(model: str, max_new_tokens: int, prompt: str) -> str:
+    """Stable per-row cache key for the frozen-teacher greedy path, so `extract-teacher-paths`
+    RESUMES across runs (the greedy decode is deterministic in the prompt). Namespaced so it never
+    collides with other cache users."""
+    h = hashlib.sha1(prompt.encode("utf-8")).hexdigest()[:16]  # cache key, not security
+    return f"teacher_path:{model}:{max_new_tokens}:{h}"
 
 # Neutral on purpose: works across all task families (QA, descriptive, control) and never tells
 # the model to "talk about the subject" — capability preservation starts at the prompt.

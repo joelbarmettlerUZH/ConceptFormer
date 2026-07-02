@@ -5,7 +5,7 @@ traceable to ground-truth data *before* anything goes into the paper. Numbers dr
 the audit trail that lets us re-verify each one. **Do not cite a number from here in the paper
 without first re-checking it at the linked source.**
 
-Last updated: 2026-06-16.
+Last updated: 2026-07-02.
 
 ---
 
@@ -17,10 +17,14 @@ Last updated: 2026-06-16.
 | W&B run URL pattern | `https://wandb.ai/university-of-zurich/conceptformer-v2/runs/<run_id>` |
 | W&B sweep URL pattern | `https://wandb.ai/university-of-zurich/conceptformer-v2/sweeps/<sweep_id>` |
 | Model checkpoints | W&B **artifacts** `model:<checkpoint_name>` (e.g. `model:sub_off_72k`), attached to their run |
-| Training corpus | `data/cf_train/cftrain_qa_10k/qa_distill.jsonl` — **92,177** distill examples |
-| Snapshot (graph) | `data/snapshots/cftrain_10k` — 10,000 subgraphs, `min_edges=6` |
-| Snapshot integrity | sha256 `8aa882a06d56ef028b0a2de99ac4c7f9c1b1f4dcc3c54dfd5a1ab978c93d633e` (in `manifest.json`) |
+| Exploration corpus (F1–F9) | `data/cf_train/cftrain_qa_10k/qa_distill.jsonl` — **92,177** distill examples |
+| Exploration snapshot | `data/snapshots/cftrain_10k` — 10,000 subgraphs, `min_edges=6` |
+| Exploration snapshot sha | sha256 `8aa882a06d56ef028b0a2de99ac4c7f9c1b1f4dcc3c54dfd5a1ab978c93d633e` |
+| Main corpus (Phase B/C/D) | `data/cf_train/cftrain_qa_100k/qa_distill.jsonl` — **925,178** distill examples |
+| Main snapshot | `data/snapshots/cftrain_100k` — 100,000 subgraphs, sha256 `ee4850f5633d8aa2a374bb9e145ce10675870274e7b25ca5bf0c5f545e60242c` |
 | Backbone (frozen) | `Qwen/Qwen3-0.6B` (teacher and student share it) |
+| Generator (corpus QA) | Gemma `cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit` via vLLM (`--max-model-len 8192`) |
+| Key W&B groups | `phase31-capacity` `phase32-kcurve` `phase33-augment` `phase34-placement` `phase25-grad-accum` `phaseB-lr-convergence` `phaseC-kfamily-100k`; HP sweep `nzaaivsg` |
 
 Metrics that live **only in W&B** are linked by run id. Metrics produced by a **CLI eval** (no W&B
 run) are reproduced by the exact command given — that command *is* the ground truth. Local `/tmp/*.log`
@@ -53,59 +57,102 @@ relative-ordering evidence, not absolute ceilings.
 
 ---
 
-## Finding 1 — Encoder capacity saturates early; bigger is not better
+## Finding 1 — Encoder capacity peaks at ~70M; the largest encoder (231M) is clearly worse
 
-> ⚠️ **DOWNGRADED → within the init-noise floor (see F8).** Single-seed runs; the full spread is
-> only 8 pts ≈ the ~±8-pt init noise, so the "bigger isn't better" ordering is **NOT established**.
-> Needs a multi-seed re-run. Also subject to the 24k undertraining caveat above.
+> ✅ **RE-ESTABLISHED on the stabilized base (Phase 3.1).** Multi-seed (×3) re-run on the locked
+> config clears the noise floor: the 231M encoder underperforms by ~9 pts (≫ combined std), so
+> "bigger is not better" at the top end is now **evidence**. The *refinement* vs the old single-seed
+> read: the optimum is **d1024/L4 (~70M), not d768 (~21M)** — see below.
 
-**Claim.** Held-out accuracy is flat-to-declining across encoder size: a ~21M-param encoder matches
-a 70M one and **beats** a 231M one. Capacity is not the bottleneck.
+**MEASURED (Phase 3.1, group `phase31-capacity`, locked base: gate-none, eff-batch-32 via
+grad-accum2, 72k, k8, ×3 seeds).** d1024/L4 reuses the locked config's 3 seeds (`p25_eff32_*`).
 
-**Source.** Sweep `642bhv2c` — <https://wandb.ai/university-of-zurich/conceptformer-v2/sweeps/642bhv2c>
-(16 runs, grid `d_model ∈ {512,768,1024,1536} × n_layers ∈ {2,3,4,6}`, k=8, 24k steps, subsample on).
+| d_model | n_layers | params | held_out (mean±std) | held_in | run_ids |
+|--:|--:|--:|--:|--:|---|
+| 512 | 2 | ~10M | 0.508 ± 1.31 | 0.755 | `p31_d512_L2_s{0,1,2}` |
+| 768 | 2 | ~21M | 0.508 ± 4.09 | 0.817 | `p31_d768_L2_s{0,1,2}` |
+| **1024** | **4** | **~70M** | **0.535 ± 1.08** | 0.823 | `p25_eff32_s{0,1,2}` |
+| 1536 | 6 | ~231M | 0.445 ± 1.78 | 0.583 | `p31_d1536_L6_s{0,1,2}` |
 
-| d_model | n_layers | params | held_out/concept_acc | run_id |
-|--:|--:|--:|--:|---|
-| 1024 | 4 | 70.4M | **0.315** | `bdxi4ob3` |
-| 768 | 2 | 21.3M | 0.305 | `qmaiv9mf` |
-| 768 | 4 | 40.2M | 0.300 | `fcunbg0g` |
-| 1536 | 3 | 118.1M | 0.300 | `m2ahnefj` |
-| 1536 | 6 | **231.4M** | 0.270 | `itp2kb6z` |
-| 512 | 3 | 14.2M | 0.235 (min) | `kg0alzho` |
+**Read.**
+- **231M is clearly the worst** (0.445 vs 0.535 at 70M; gap ~9 pts ≫ combined std ~1.5). "Bigger is
+  not better" holds at the top end — and now with error bars, unlike the downgraded single-seed F1.
+- **Peak is ~70M (d1024/L4), modestly above the 10–21M points** (0.535 vs 0.508, ~2.7 pts ≈ 1.6×
+  combined std — suggestive, not airtight). So there *is* a mild capacity benefit up to ~70M, then a
+  sharp reversal. This **corrects** the old single-seed claim that 21M already matched 70M.
+- **231M's low held_in (0.583) too** → it is not overfitting; it underperforms *overall*. Caveat: the
+  231M encoder may simply be **harder to optimize at this step/LR budget** (undertrained-relative),
+  not fundamentally worse — a fixed-budget result, not a capacity ceiling per se.
+- d768/L2 is anomalously noisy (std 4.09, range 10 pts; seeds .46/.505/.56) — the only high-variance
+  capacity point on the stabilized base; worth a flag, n=3.
 
-Full 16-row table in the sweep. **Spread is only 0.235→0.315** (8 pts) across a 23× param range.
-Sweet spot ≈ **d768, L2–4 (21–40M params)**.
+**Decision.** Best capacity = **d1024/L4 (~70M)** = the locked config. Phase 3.2 (k-curve) runs at
+this capacity. (Smaller d768/d512 give up ~2.7 pts but cost 3–7× fewer params — a viable cheap
+alternative if Phase 4 needs speed/scale; revisit at 100k.)
 
-**Re-verify:** open the sweep, sort runs by `held_out/concept_acc`, confirm the 231M run
-(`itp2kb6z`) sits below the 21M run (`qmaiv9mf`).
+**Re-verify:** group `phase31-capacity`, ×3 seeds; confirm `p31_d1536_L6_*` (231M) sits ~9 pts below
+`p25_eff32_*` (70M).
 
 ---
 
-## Finding 2 — k-curve: an entity's neighborhood compresses into ~4–8 concept tokens
+## Finding 2 — k-curve: accuracy keeps rising with more concept tokens (NO knee by k=16)
 
-> ⚠️ **DOWNGRADED → within the init-noise floor (see F8).** k=4→k=8 differs by ~3 pts ≪ the ~±8-pt
-> init noise; the k=1/2 starvation (−6 pts) is more likely real but still single-seed. The knee
-> location is **NOT established** without a multi-seed re-run. Also subject to the 24k caveat above.
+> 🔄 **OLD CLAIM REFUTED, re-measured (Phase 3.2).** The original "peaks at k=8, flat after; knee
+> k≈4–8" was single-seed @24k (undertrained) + subsample, inside the ~8-pt noise. On the stabilized
+> base @72k ×3 seeds the curve is **monotonically increasing through k=16** — there is **no plateau**
+> in the tested range. The "an entity compresses into ~4–8 tokens" headline does **not** hold here.
 
-**Claim.** Accuracy is starved at k=1–2, jumps at k=4, peaks at k=8, then flat/noisy. The knee at
-**k≈4–8** is the compression headline. KL keeps falling past the knee while accuracy does not (KL ≠
-task accuracy).
+**MEASURED (Phase 3.2, group `phase32-kcurve`, locked base: gate-none, eff-batch-32, 72k, d1024/L4,
+×3 seeds).** k=8 reuses the locked config's seeds (`p25_eff32_*`).
 
-**Source.** Sweep `aenmzr4v` — <https://wandb.ai/university-of-zurich/conceptformer-v2/sweeps/aenmzr4v>
-(6 runs, `k ∈ {1,2,4,8,16,32}`, capacity fixed d1024/L4, 24k steps, subsample on).
-
-| k | held_out/concept_acc | popqa/concept_acc | held_out/val_kl | run_id |
+| k | held_out (mean±std) | held_in | KL | run_ids |
 |--:|--:|--:|--:|---|
-| 1 | 0.250 | 0.160 | 0.859 | `8equtffh` |
-| 2 | 0.250 | 0.160 | 0.862 | `qc830h57` |
-| 4 | 0.285 | 0.195 | 0.802 | `58abpu0m` |
-| **8** | **0.315** | **0.195** | 0.799 | `b6z1objc` |
-| 16 | 0.280 | 0.155 | 0.825 | `gte0de89` |
-| 32 | 0.310 | 0.190 | 0.783 | `bibpizex` |
+| 1 | 0.328 ± 1.84 | 0.458 | 0.838 | `p32_k1_s{0,1,2}` |
+| 2 | 0.390 ± 2.27 | 0.612 | 0.761 | `p32_k2_s{0,1,2}` |
+| 4 | 0.418 ± 1.25 | 0.657 | 0.722 | `p32_k4_s{0,1,2}` |
+| 8 | 0.535 ± 1.08 | 0.823 | 0.624 | `p25_eff32_s{0,1,2}` |
+| **16** | **0.637 ± 4.40** | 0.872 | 0.553 | `p32_k16_s{0,1,2}` |
 
-**Re-verify:** open the sweep; confirm the k=8 run (`b6z1objc`) is the held-out max and that
-`held_out/val_kl` at k=32 (`bibpizex`, 0.783) is *below* k=8 while accuracy is not higher.
+**Read.**
+- **Monotone increasing, no knee:** every doubling of k adds accuracy (0.328→0.390→0.418→0.535→0.637),
+  and KL falls monotonically (0.838→0.553). More tokens keep helping through k=16.
+- **k=16 > k=8 is real despite k=16's noise** (std 4.40, range 10 — a high-variance point like
+  d768/L2): gap 0.637 vs 0.535 = 10.2 pts ≈ 3.9× the combined SEM, and even the *worst* k=16 seed
+  (0.575) beats the *best* k=8 seed (0.55). The *magnitude* past k=8 is uncertain; the *direction* is
+  not.
+- **Contradicts the old undertrained sweep**, where k=16 (0.280) sat *below* k=8 (0.315). That flip
+  is the undertraining caveat (F4) biting: at 24k the larger-k encoder hadn't converged; at 72k it
+  pulls clearly ahead. Lesson: k-capacity interacts with training horizon — never read a k-curve off
+  undertrained runs.
+
+**Token-cost reframe (the actual efficiency claim).** Raw k is the wrong axis; the claim is "k concept
+tokens replace F verbalized-fact tokens." **Measured F** (Qwen tokenizer, exact teacher verbalizer
+`verbalize_with_answer` @budget 2048, 200 held-out eval entities): **median 100, mean 125.1, p95 273**
+tokens (budgeted == uncapped → neighborhoods fit, confirms F6). Accuracy vs knowledge-token cost
+(base floor 0.11 @0 tok; teacher ceiling 0.99 @~100 tok):
+
+| method | knowledge tokens | held-out | gap closed | compression F/k (median) |
+|---|--:|--:|--:|--:|
+| base | 0 | 0.11 | 0% | — |
+| concept k=8 | 8 | 0.535 | 48% | 12.6× |
+| concept k=16 | 16 | 0.637 | 60% | 6.3× |
+| teacher/RAG | ~100 | 0.99 | 100% | 1× |
+
+**Implication:** value lives in the **low-token regime**; raising k *erodes* the compression headline
+(k=32 → only ~3×). So extending the concept curve to k=32 is **not** the priority. The missing piece
+is the **competitor curve: text-RAG accuracy vs ITS token budget** {8,16,32,64,~100} — deferred to
+**Phase 4** (the paper's headline figure). Design note for then: the fair RAG baseline is *realistic*
+retrieval (top-PageRank `verbalize_budgeted`, **no** answer guarantee); our answer-guaranteed teacher
+verbalization stays near-ceiling even at tiny budgets (needs only the ~9-token answer edge) and would
+rig the comparison.
+
+**Best-k status:** k=16 is best measured (0.637) but the curve hasn't plateaued and "best k" depends
+on the token-cost trade — **deferred to Phase 4**; do NOT lock a k yet. k=16's high variance
+(std 4.40) warrants extra seeds if it enters the final recipe.
+
+**Re-verify:** group `phase32-kcurve`, ×3 seeds; confirm `p32_k16_*` mean (0.637) sits clearly above
+`p25_eff32_*` (0.535, k=8) and KL decreases monotonically with k. F (token cost): re-run the offline
+verbalize+tokenize count over the seed-0 val split of `cftrain_10k` (median ≈ 100).
 
 ---
 
@@ -241,12 +288,30 @@ full-verbalize tokens p50=96, p90=209, p99=476, max=2193; **1/10000** subgraphs 
 
 ## Finding 7 — Prompt augmentation is a GENERALIZATION lever (breaks the ~40% ceiling)
 
-> ⛔ **DOWNGRADED → NOT established (within init noise, see F8).** The augment effect **flips sign**
-> across init pairs: old code aug-on−aug-off = +8.5 (`0ze8ia5q` 0.485 − `kuyslwjf` 0.400), new code
-> = −6.5 (`xqui9aio` 0.400 − `uqdcag0a` 0.465). Mean ≈ 0 ± ~7.5. The cross-prompt robustness harness
-> compared two SINGLE checkpoints, so it does not rescue the claim — `0ze8ia5q` may just be a lucky
-> init. **Must be re-tested multi-seed before any augment claim.** Keeping the section below for the
-> measured numbers, but the conclusion is suspended.
+> 🟡 **RE-TESTED at n=3 on the locked base (Phase 3.3) → UNDERPOWERED, trends positive, not
+> significant.** Augment-on vs -off, ×3 seeds each, scored by the 7-prompt robustness harness. Point
+> estimates lean positive on every framing (held-out +3.8 pt 7-prompt-mean / +5.8 pt held-out-prompt-
+> only; popqa +1.2–1.4 pt) — the SAME direction as the original claim — but the **cross-prompt
+> across-seed std is ~6–9 pt** (≫ the ~1-pt single-prompt floor), so nothing clears noise at n=3.
+> NOT "augment does nothing" — it's "effect smaller than the cross-prompt seed variance; n=3 can't
+> resolve it." Resolving needs ~6 seeds (or a lower-variance metric). The original ⛔ sign-flip was a
+> 2-checkpoint artifact; with 3 seeds the mean trends up, but honestly remains a non-result for now.
+> Do NOT put augment in the recipe on current evidence; revisit with more seeds in Phase 4 IF needed.
+>
+> **MEASURED (Phase 3.3, group `phase33-augment` + robustness logs).** aug-off = locked config reused
+> (`p25_eff32_s{0,1,2}`); aug-on = `p33_augon_s{0,1,2}`. 7-prompt-mean held-out: aug-off 60.8±6.5 vs
+> aug-on 64.6±8.6. popqa: 23.0±1.7 vs 24.3±3.6. Held-out-PROMPT-only (unseen by both arms, the clean
+> generalization test): held-out 58.8±6.4 vs 64.7±8.3; popqa 23.0±1.2 vs 24.2±3.9. A promising n=2
+> popqa separation vanished when seed s2 landed (popqa 19.7) — a reminder not to read n=2.
+>
+> *Side-observation (new):* the locked config stabilized SINGLE-prompt accuracy (~1-pt std) but NOT
+> cross-prompt generalization (~6-pt std across seeds) — prompt-robustness is a noisier axis; F8's
+> "stability" is prompt-specific. (Part of that 6 pt is n=200 sampling noise, ~3.5 pt binomial.)
+>
+> --- historical downgrade note (superseded by the above) ---
+> ⛔ The augment effect flipped sign across single-init pairs: old code aug-on−aug-off = +8.5
+> (`0ze8ia5q`−`kuyslwjf`), new code = −6.5 (`xqui9aio`−`uqdcag0a`). The single-checkpoint numbers
+> below predate the stabilized base; keep for provenance only.
 
 **Claim.** Distilling under 5 diverse system prompts (`--augment`) does NOT merely preserve prompt
 robustness (F5) — it **substantially improves generalization** on the SAME 10k corpus, lifting
@@ -280,12 +345,15 @@ vs the same on `sub_off_72k`; compare the 7-prompt mean rows.
 
 ---
 
-## Finding 8 — Large run-to-run variance (~8 pts) — cause is HYPOTHESIS, not yet proven
+## Finding 8 — Large run-to-run variance (~8 pts) — RESOLVED by the stabilized config
 
-> 🟡 **PARTIAL — observation solid, attribution unconfirmed.** The *existence* of ~8-pt run-to-run
-> variance is observed; that it is *caused by weight init* (vs CUDA nondeterminism or the old-vs-new
-> code difference) is a **hypothesis under test**, not a diagnosis. It still downgrades F1/F2/F7
-> because *whatever* the cause, single-run effects ≲8 pts aren't trustworthy.
+> ✅ **RESOLVED (config LOCKED 2026-06-19).** The ~8-pt run-to-run *outcome* variance is fixed by
+> **gate-none + effective batch 32 via grad-accum** (held-out range 2.5 pt @72k, ×3 seeds). Cause was
+> sensitivity (not just init): seeding torch made init reproducible but same-seed runs still diverged;
+> we fixed it in training/architecture, NOT by forcing CUDA determinism. Full narrative + measurements
+> below (round-1 noise floor → round-2 arms → 72k validation → grad-accum batch-size curve → LOCK).
+> The downgrades it forced (F1/F2/F7) were re-tested multi-seed on the stabilized base (see those
+> findings + F10/F11). The history below is kept verbatim for provenance.
 
 **Observed (fact).** Four "prefix" runs with the same `--seed 0` (so data order identical) span
 held-out **0.40–0.485 (~8.5 pts)** and KL **0.647–0.727**. Within each run training is stable (smooth
@@ -432,26 +500,368 @@ this base and report mean±std over ≥3 seeds; an effect counts only if it clea
   (`sub_on_72k` / `sub_off_72k`), not a config field.
 - **M4 — Undertraining caveat** applies to all 24k-step sweep runs (findings 1–2); see the caveat box
   above.
+- **M5 — Two corpora.** `cftrain_qa_10k` (snapshot `cftrain_10k`, 10k entities, **92,177** distill
+  rows) = the exploration workbench (F1–F9 all here). `cftrain_qa_100k` (snapshot `cftrain_100k`,
+  100k entities, **925,178** distill rows, generated 2026-06-23) = the main-model corpus (Phase
+  B/C/D). 100k is a clean 10× scale-up: 8.8% Gemma gen-fail (vs 10k's 8.9%), identical tier/task-type
+  proportions, teacher paths mean-len 30.8 / 0 degenerate. **Regime differs sharply:** at eff-batch-32
+  one epoch = ~25,300 steps on 100k vs ~2,900 on 10k, so the 10k runs were ~25 epochs (overfit-prone)
+  and 100k runs are few-epoch. Cache teacher hidden upfront only on small data (`--no-cache-teacher`
+  on 100k: 925k rows would need ~78 GB).
+- **M6 — Locked main-model config (from F8 + F10).** gate-none, effective batch 32 (`--batch 16
+  --grad-accum 2`), `before_entity` placement (F9), d1024/L4, k per the curve (F2/F11); HPs lr 1e-4,
+  schedule constant, weight-decay 0.01, warmup-frac 0.05; `--no-cache-teacher`; checkpoint-selected on
+  best held-out. This is the config all Phase-C/D numbers come from.
+
+---
+
+## Finding 9 — Concept-token placement doesn't help; `prefix` is best, `replace_entity` is worse
+
+> ✅ **EVIDENCE-BACKED (Phase 3.4, ×3 seeds on the locked base).** Where the k concept tokens sit
+> relative to the entity mention has **no useful effect**; the default `prefix` is (weakly) best, and
+> *removing* the entity surface form (`replace_entity`) is actively worse and unstable. The
+> adjacency/replacement-improves-binding hypothesis is **refuted**.
+
+**MEASURED (group `phase34-placement`, locked base: gate-none, eff-batch-32, 72k, d1024/L4, k8).**
+`prefix` reuses the locked config (`p25_eff32_*`).
+
+| placement | held-out (mean±std) | held_in | KL | run_ids |
+|---|--:|--:|--:|---|
+| **prefix** (default) | **0.535 ± 1.08** | 0.823 | 0.624 | `p25_eff32_s{0,1,2}` |
+| before_entity | 0.513 ± 1.70 | 0.787 | 0.660 | `p34_before_entity_s{0,1,2}` |
+| after_entity | 0.518 ± 0.85 | 0.813 | 0.652 | `p34_after_entity_s{0,1,2}` |
+| replace_entity | 0.487 ± 4.70 | 0.848 | 0.748 | `p34_replace_entity_s{0,1,2}` |
+
+**Read.** prefix/before/after cluster in 0.513–0.535 — a ~2-pt spread inside the combined noise, so
+positioning concepts adjacent to the entity gives **no binding benefit**. `replace_entity` is lowest
+(0.487) and by far the noisiest (std 4.70): when the entity surface form is deleted, the concepts
+must fully *be* the entity, which both hurts accuracy and destabilizes training. Its high held_in
+(0.848) with low held_out = it overfits the substitution rather than generalizing. **Keep `prefix`.**
+*Caveat:* `replace_entity` s0 alone was 0.545 (highest single point) but collapsed to 0.485/0.430 at
+s1/s2 — the third n=1→n=3 collapse this phase (cf. augment n=2, replace n=1); single-seed placement
+reads are worthless.
+
+**RECIPE DECISION (2026-06-22): adopt `before_entity` despite `prefix` being marginally higher.**
+Rationale is forward-looking, not accuracy: `before_entity` is **mention-anchored** (concepts sit at
+the entity's position), so it extends naturally to inputs that mention **multiple entities** — each
+mention gets its own concept block inline, which a single message-`prefix` block cannot do cleanly
+(N entities → ambiguous which concepts bind to which mention). It also keeps the entity surface form
+(unlike `replace_entity`, which deletes the anchor and pays for it: worst + unstable). The accuracy
+cost vs `prefix` is **2.2 pt (within ~1.9× the difference-SEM at n=3 — not a clean gap)**, accepted as
+the price of multi-entity scalability. NOTE: all Phase-3 ablations (capacity/k/augment) used `prefix`;
+placement is within-noise of it, so the transfer is expected to hold, but the final **headline recipe
+model must be trained at `before_entity`** and confirm k=16 etc. there (placement×k interaction
+unmeasured). Multi-entity is currently UNTESTED (single-entity corpus) — `before_entity`'s real
+advantage is a design property, to be validated if/when a multi-entity eval exists.
+
+**Re-verify:** group `phase34-placement`, ×3 seeds; confirm `replace_entity` mean < `prefix` and its
+std (4.7) is the largest of the four modes; `before_entity` 0.513 vs `prefix` 0.535.
+
+---
+
+## Finding 10 — Training-HP selection on 100k; lr ≈ 1e-4, and short-horizon sweeps bias toward low lr
+
+> ✅ **EVIDENCE-BACKED (Phase B, 100k corpus).** On the locked architecture, **lr dominates** the
+> training HPs and **5e-5 ≈ 1e-4** at a real horizon (2e-4+ clearly worse). A 0.4-epoch sweep ranked
+> lr *monotonically* (lower better) — the classic **short-horizon low-lr bias**; it did NOT survive a
+> longer run. **Locked: lr 1e-4, schedule constant, weight-decay 0.01, warmup-frac 0.05.**
+
+**MEASURED — HP sweep (W&B sweep `nzaaivsg`, 18 trials, 12k steps ≈ 0.4 epoch, metric held-out).**
+Architecture pinned to the locked config; bayes over lr × schedule × warmup × weight-decay. Mean
+held-out by lr: **5e-5 0.222 > 1e-4 0.197 > 2e-4 0.158 > 4e-4 0.142**. Best trial: lr5e-5 / constant /
+wd0.01 / warmup0.05 = **0.270**. Secondary: wd 0.01 ≳ 0; warmup 0.02 ≈ 0.05; "constant > cosine" —
+but that is **confounded** (cosine decayed the LR to ~0 over the tiny 12k-step horizon, penalising it
+at the 0.4-epoch eval), so the schedule ranking from the sweep is not trustworthy on its own.
+
+**MEASURED — lr at a real horizon (group `phaseB-lr-convergence`, 40k steps ≈ 1.6 epoch, constant
+schedule, wd0.01/warmup0.05).** lr 5e-5 → **0.370** (`lrc_lr5e5`), lr 1e-4 → **0.365** (`lrc_lr1e4`),
+lr 2e-4 → 0.270 (`lrc_lr2e4`). **5e-5 and 1e-4 are tied** (within 0.5 pt) — the sweep's "5e-5 ≫ 1e-4"
+was purely the short-horizon artifact; 1e-4 fully caught up by 1.6 epochs. Locked **lr 1e-4**
+(tied accuracy, faster early convergence → fewer steps, lower KL 0.688 vs 0.710, and our proven
+default). **Lesson:** never read lr off a sub-epoch sweep — it systematically favours the lowest lr.
+
+**Re-verify:** sweep `nzaaivsg` (sort by held_out/concept_acc; confirm lr monotonicity at 12k) vs
+group `phaseB-lr-convergence` (confirm 5e-5≈1e-4≫2e-4 at 40k).
+
+---
+
+## Finding 11 — 100k is still climbing at 1.6 epochs; scale-up looks promising (convergence horizon open)
+
+> ✅ **RESOLVED → F12.** The 1.6-epoch "still climbing" observation below was the early read; the
+> converged Phase-C result (F12) confirms it: held-out plateaus ~80–100k steps (3–4 epochs), and the
+> scale-up DOES lift the ceiling (most dramatically on PopQA, ~2.5×). Kept for the convergence-horizon
+> evidence and the lr trajectory.
+
+**MEASURED — held-out trajectory @ k8/d1024/L4, constant lr 1e-4 (group `phaseB-lr-convergence`).**
+lr 1e-4 (`lrc_lr1e4`): 5k→0.13, 10k→0.21, 15k→0.265, 20k→0.28, 25k→0.32, 30k→0.315, 35k→0.345,
+40k→**0.365** (monotone-ish, still rising). lr 5e-5 similar, peaking ~0.39 at 35k. No overfit yet at
+1.6 epochs (held-in tracks held-out), so the generous Phase-C horizon + best-held-out checkpoint
+selection is the right design (a model CAN overfit past its peak at 4 epochs — F4).
+
+**Open:** the converged 100k accuracy + the convergence step-count (sets the real horizon) come from
+Phase C (group `phaseC-kfamily-100k`). Until then, do NOT quote a converged 100k number.
+
+**Re-verify:** group `phaseB-lr-convergence`, run `lrc_lr1e4`, plot held_out/concept_acc vs step.
+
+---
+
+## Finding 12 — Scale-up (100k) forces graph-learning over memorization: PopQA ~2.25× (held-out flat)
+
+> 🟡 **STRONG SIGNAL; k4/8/16 at 3 SEEDS, k1/2/32 at 1 (Phase C + C2, group `phaseC-kfamily-100k`).**
+> Converged 100k k-family (100k steps ≈ 4 epochs, best-held-out checkpoint, locked config + HPs).
+> Numbers below are 3-seed mean±std where available (single-seed Phase-C values were revised by the
+> seeds — see point 3; e.g. k16 0.575→0.643, k8 PopQA 0.555→0.495).
+
+**MEASURED — converged 100k k-curve (best held-out checkpoint; `pc_k{k}` + `pc_k{k}_s{1,2}`).**
+
+| k | held-out | **PopQA (unseen)** | seeds |
+|--:|--:|--:|--:|
+| 1 | 0.295 | 0.215 | 1 |
+| 2 | 0.335 | 0.210 | 1 |
+| 4 | 0.472 ± 2.8 | 0.442 ± 4.0 | 3 |
+| **8** | 0.580 ± 0.8 | 0.495 ± 4.2 | 3 |
+| 16 | **0.643 ± 4.8** | 0.520 ± 0.4 | 3 |
+| 32 | 0.595 | 0.555 | 1 |
+
+**Read — three results.**
+1. **PopQA (unseen-entity generalization — the headline axis) jumps ~2.25×:** 100k k8 = **0.495 ± 4.2**
+   (3 seeds; the single-seed 0.555 was optimistic) vs the 10k corpus's ~0.22 (F7); k16 = 0.520 ± 0.4.
+   This is the paper's central claim — *learn the graph, generalize to entities never trained on* — and
+   it is the effect of **data scale**, far beyond noise (even the soft 3-seed mean is ~2.25×).
+2. **The mechanism is genuine graph-learning, not memorization.** 100k has *lower* per-entity overfit
+   (k8 held-in ~0.64 vs the 10k's ~0.82) yet *much higher* PopQA — it stopped memorizing training
+   entities and learned the edge→concept mapping. **Held-out is similar across scales** (100k k16
+   0.643 ≈ 10k k16 0.637; k8 100k 0.580 vs 10k 0.535) — the scale win is concentrated on **PopQA
+   (unseen entities)**, the honest axis, exactly as graph-learning (not memorization) predicts.
+3. **The token-efficiency knee is ~k16 (FULL 3-seed curve, 2026-07-02).** The single-seed Phase-C
+   curve suggested a k8 plateau; that was wrong (a low single k16 seed, 0.575). The complete ×3 curve:
+
+   | k | held-out (mean±std) | PopQA (mean±std) | seeds |
+   |--:|--:|--:|--:|
+   | 1 | 0.318 ± 2.3 | 0.227 ± 1.0 | 3 |
+   | 2 | 0.387 ± 3.8 | 0.320 ± 7.8 | 3 |
+   | 4 | 0.472 ± 2.8 | 0.442 ± 4.0 | 3 |
+   | 8 | 0.580 ± 0.8 | 0.495 ± 4.2 | 3 |
+   | 16 | **0.643 ± 4.8** | 0.520 ± 0.4 | 3 |
+   | 32 | 0.647 ± 4.3 | 0.533 ± 2.7 | 3 |
+
+   **Rises steeply to k16, then PLATEAUS:** k16 (0.643) ≈ k32 (0.647) on held-out (+0.4 pt for 2×
+   tokens); PopQA also flattens (k16 0.520 ≈ k32 0.533). So the knee is **~k16** — more tokens past 16
+   buy ~nothing. k16 gives +6 pt held-out over k8 for 2× tokens (still 6.3× compression vs ~100 fact
+   tokens) → **k8 vs k16 is the real efficiency trade for the recipe** (settle in Phase D). **Lesson
+   (thrice): single seeds mislead — k2 (0.335→3-seed 0.387) and k16 (0.575→0.643) were both low
+   outliers; seeding the WHOLE family caught it.** k16/k32 remain noisy (std ~4–5).
+   NOTE: k2's 3 seeds live in W&B runs `pc_k2`/`pc_k2_s1`/`pc_k2_s2` — s1/s2 are state=**failed** (a
+   transient W&B artifact-upload crash at end-of-run), but their metrics + local `_best.pt` checkpoints
+   are valid; read by run-id, not `state="finished"`.
+
+**Convergence horizon (resolves F11's open question).** Held-out plateaus by ~80–100k steps (~3–4
+epochs); small k (1,2) flatten earlier, larger k climb to ~90k. k8 was still creeping up at 100k
+(0.525→0.570 in the last 10k) so it is near-but-not-fully converged — a longer horizon might add a
+little. No collapse/overfit caught by best-checkpoint selection.
+
+**Recipe implication (revised after seeds).** Not a free k8 plateau — k16 buys +6 pt held-out over
+k8 for 2× tokens (still 6.3× compression vs the median 100 fact tokens, F2). **k8 vs k16 is a genuine
+token-efficiency trade to settle in Phase D** (held-out favours k16; PopQA nearly flat 0.495→0.520 so
+favours the cheaper k8). Candidate headline models: `model:pc_k8_best` (efficiency) or k16 (peak
+held-out). PopQA's flatness means k8 already captures most unseen-entity generalization.
+
+**Caveats.** k4/8/16 at 3 seeds; k1/2/32 still 1 seed (seeding in progress). k16/k32 noisy (std ~5).
+k8 not fully converged (still creeping at 100k steps). Next: finish k1/2/32 seeds; Phase-D figure.
+
+**Re-verify:** group `phaseC-kfamily-100k`; aggregate `held_out/concept_acc_best` + `popqa/concept_acc`
+across seeds per k (k16 held-out 0.643 > k8 0.580; PopQA k8 0.495 vs 10k F7 ~0.22); note held-in falls
+0.82→0.64 (less memorization) while PopQA rises.
+
+---
+
+## Finding 13 — It reads the graph (separable edges + counterfactual swap), and faithfulness SCALES with k
+
+> ✅ **STRONG — full k-family sweep, 1 seed/k (best-seed best-ckpt `pc_k{k}_s1_best`, Phase E/F,
+> `cf-graph-faithfulness`, 400 held-out single-fact probes each, with base-bracket split).** The
+> concepts carry real per-edge graph content (provably; NOT the LLM's memory; NOT an undifferentiated
+> blob), AND the encoding gets **more faithful as k grows**: counterfactual edge-swap-follow rises
+> **monotonically 0.8% → 34.2%** (k1→k32) while sticking-to-the-now-false-original falls 39% → 14%.
+> The k8 snapshot (~23% swap-follow) that once read as "holistic/partial" is a point on a clean
+> capacity curve — faithfulness is **capacity-limited, not absent**.
+
+**MEASURED — full sweep (400 probes each; base = frozen Qwen, NO concepts; swap/stick on the
+base-UNKNOWN subset = no parametric-memory confound).**
+
+| k | concept correct | base-only | ablate-ANSWER (want LOW) | ablate-OTHER (want HIGH) | swap-follow→FALSE | stick-to-orig |
+|--:|--:|--:|--:|--:|--:|--:|
+| 1  | 41.2% | 10.0% | 55.2% | 90.3% | 0.8%  | 39.1% |
+| 2  | 47.0% | 10.0% | 54.3% | 94.7% | 5.3%  | 30.9% |
+| 4  | 55.8% | 10.0% | 37.7% | 95.5% | 16.5% | 20.2% |
+| 8  | 63.0% | 10.0% | 33.7% | 92.1% | 25.8% | 20.2% |
+| 16 | 65.2% | 10.0% | 35.6% | 95.0% | 29.8% | 17.8% |
+| 32 | 70.2% | 10.0% | 27.8% | 94.0% | **34.2%** | **14.0%** |
+
+**Read — three clean signals, all pointing the same way.**
+1. **It's the concepts, not the LLM's memory.** base-only (frozen Qwen, no concepts) knows just **10%**
+   at every k; with concepts, 41–70%. The +30–60 pt is injected knowledge, not parametric recall.
+2. **Edges are encoded SEPARABLY, at all k.** Removing an UNRELATED edge barely dents accuracy (90–96%),
+   removing the ANSWER edge collapses it (55%→28%) — a 35–66 pt gap that *widens* with k (k32:
+   94% vs 28%). Not an entangled blob; individual edges are load-bearing, and more so at higher k.
+3. **The counterfactual swap — the true graph-reading discriminator — SCALES with k.** Replacing the
+   answer edge's neighbor with a type-plausible FALSE entity: the model follows it to the false answer
+   **0.8% (k1) → 16.5% (k4) → 25.8% (k8) → 34.2% (k32)**, monotone; meanwhile stick-to-original falls
+   39%→14%. At k32, on contradicted edges the model follows the false neighbor **2.4× more often than it
+   sticks to the (now-wrong) truth**. Separability alone can't tell graph-encoding from per-fact
+   text-compression (removing a fact's text also loses it) — but the swap can, and its steady climb
+   with capacity is exactly what a graph reader (not a memoriser) predicts.
+
+**Why it matters for the grant.** Faithfulness is **capacity-limited, not architectural**: the k8
+"~23%, holistic" reading was one point on a curve that keeps rising. This is a *scaling* argument —
+more concept tokens (and, plausibly, more data/compute) buy a more faithful graph reader — directly
+motivating the scale-up. The remaining gap to a perfectly steerable per-edge reader is consistent with
+a **lossy, set-pooled (permutation-invariant) encoding** that degrades under an OOD false edge.
+
+**Caveats.** 1 seed per k (the swap monotonicity is clean enough to trust the trend; error bars TBD).
+Swap uses type-plausible false neighbors from a same-property pool. Absolute swap-follow is still <50%
+even at k32 — faithful-but-lossy, not a clean lookup table.
+
+**Open follow-ups:** (a) does the curve keep rising on the 300k model at fixed k (data-scaling, not
+just k-scaling)? (b) a per-edge auxiliary loss to push swap-follow higher? (c) linear-probe readout of
+the swapped edge from the concept vectors (is the content present but under-used by the frozen LLM?).
+
+**Re-verify:** `scripts/phaseF_graphfaith_sweep.sh` (`cf-graph-faithfulness --checkpoint pc_k{k}_s1_best
+--n 400`); clean signals: base-only 10% ≪ concept at every k; ablate-OTHER ≫ ablate-ANSWER (gap widens
+with k); swap-follow rises monotonically 0.8%→34.2% while stick falls 39%→14%.
+
+---
+
+## Finding 14 — v1 (arXiv 2504.07624) comparison: v2 reproduces the phenomena on a modern, harder setup
+
+> ✅ **CONTEXT / corroboration (not a head-to-head number).** v1 and v2 differ on backbone, metric,
+> task, and eval sets, so a direct number comparison is apples-to-oranges. What matters: v2
+> **reproduces v1's core phenomena** on a *stronger backbone, a stricter metric, and a harder task*,
+> and *adds* two things v1 lacked — an unseen-entity generalization axis (PopQA) and a graph-faithfulness
+> proof. Source: `hf papers read 2504.07624` (v1, Barmettler 2025).
+
+**The setups are NOT comparable number-for-number — be honest about this in the paper:**
+
+| axis | v1 (2504.07624) | v2 (this work) |
+|---|---|---|
+| frozen backbone | GPT-2 0.1B (125M) | Qwen3-0.6B (~600M) |
+| metric | **Hit@10 / Hit@1** (gold token in top-k logits) | **greedy exact-match accuracy** (much stricter) |
+| task | next-token factual recall on T-REx sentences (fill-in the object) | **QA** (answer a generated question) + PopQA |
+| train/eval data | Tri-REx (synthetic) → T-REx Bite (Wikipedia); WebQSP for QA | Gemma-generated QA over Wikidata 1-hop; held-out Qs + **PopQA unseen entities** |
+| knowledge source | 1-hop Wikidata neighborhood → concept vectors | same (1-hop Wikidata → k concept tokens) |
+| training | 2-stage (pretrain Tri-REx → finetune T-REx Bite), next-token CE | **KL self-distillation** vs frozen-LLM-reading-facts teacher |
+
+**v1 headline numbers (for the record).** CF-15 on T-REx Bite: **Hit@1 46.7%, Hit@10 72.5%** (~10x over
+GPT-2 0.1B baseline). Single vector CF-1: Hit@1 33.3% > text-RAG 6.6% at **130x fewer tokens**. Up to
+**+272% (Wikipedia) / +348% (synthetic)** Hit@10 over baseline. Knee at **~10-15 vectors** (diminishing
+returns beyond). Some CF-n beat LLaMA-2 7B (50x larger) at Hit@1.
+
+**What v2 REPRODUCES (the phenomena survive a harder setup):**
+1. **Concept vectors >> text-RAG per token.** v1: CF-1 beats RAG at 130x fewer tokens. v2: concepts
+   dominate the low-token regime (F-RAG-budget: at 8 tokens, concept held-out 0.580 vs RAG 0.123, ~4.7x;
+   PopQA 0.495 vs 0.093, ~5.3x) and reach RAG-level accuracy at ~6x fewer tokens.
+2. **A knee at ~10-16 concept tokens.** v1: ~10-15 vectors cover a 1-hop neighborhood. v2 (F12, 3 seeds):
+   knee ~k16, plateau k16≈k32. **Architecture-consistent across a 5x-larger backbone and a different
+   task** — evidence the knee is a property of 1-hop-neighborhood capacity, not of GPT-2.
+3. **Even a single concept token is already useful.** v1: CF-1 Hit@1 33.3%. v2: k1 held-out 0.318, PopQA
+   0.227 (greedy exact-match — a far stricter bar).
+
+**What v2 ADDS (the contribution beyond v1):**
+- **Unseen-entity generalization (PopQA).** v1 headlines Hit@k on *trained-vocabulary* T-REx entities;
+  v2's headline axis is **entities never seen in training** (PopQA), where data-scale lifts accuracy
+  ~2.25x (F12). This is the honest "learn the graph, not memorize entities" claim v1 did not isolate.
+- **A graph-faithfulness proof (F13).** Counterfactual edge-swap + edge-ablation shows the concepts
+  carry separable per-edge content and read the graph (swap-follow scales 0.8%->34.2% with k) — a causal
+  test v1 never ran (v1 argued efficiency + recall, not faithfulness).
+- **A modern frozen backbone + KL self-distillation** (vs GPT-2 + next-token CE), and a locked,
+  multi-seed, error-barred protocol (F8) rather than single-run point estimates.
+
+**Grant framing.** v2 is not "v1 with bigger numbers" — the metrics forbid that claim. It is **v1's
+phenomena, re-established on a modern LLM under a stricter metric and a harder QA/unseen-entity task,
+plus a faithfulness proof and a data-scaling signal**. The ask (more compute) is to push the data-scaling
+curve (100k -> 300k -> 1M) that F12 shows is still climbing.
+
+**Re-verify:** `hf papers read 2504.07624`; v2 numbers from F12 (k-curve, PopQA) + F-RAG-budget +
+F13 (faithfulness). Keep the metric/backbone/task caveats attached to any v1<->v2 sentence.
+
+---
+
+## Finding 15 — Capability preserved: concept tokens are near-inert on control tasks, even at k=32
+
+> ✅ **EVIDENCE-BACKED — full k-family, 1 seed/k (Phase F, `cf-capability-preservation`, 400 held-out
+> CONTROL tasks each, `pc_k{k}_s1_best`).** Injecting concept tokens does NOT degrade the frozen LLM's
+> normal generation on tasks that name the entity but don't ask about its facts: the next-token
+> distribution barely moves (median KL 0.06-0.08 nats) and does NOT blow up as k grows 1 -> 32.
+
+**MEASURED (400 controls each; frozen Qwen WITH concepts vs WITHOUT).** Control prompts are the
+off-topic templates in `generate/control.py` (translate/continue/echo/embedded-arithmetic), synthesized
+on the fly over held-out entities — the 100k corpus was generated without control tasks (only
+single/compositional), so the command falls back to the template bank when none are found.
+
+| k | greedy-agreement (32-tok exact) | KL(base‖concept) median | KL mean | KL max |
+|--:|--:|--:|--:|--:|
+| 1  | 29.5% | 0.082 | 0.193 | 4.08 |
+| 2  | 27.8% | 0.058 | 0.191 | 3.32 |
+| 4  | 30.0% | 0.061 | 0.189 | 4.08 |
+| 8  | 33.5% | 0.066 | 0.198 | 3.36 |
+| 16 | 28.5% | 0.075 | 0.231 | 5.08 |
+| 32 | 33.5% | 0.078 | 0.235 | 6.73 |
+
+**Read.** (1) **Median KL is tiny (0.06-0.08 nats) and only inches up** across a 32× range of k — the
+distribution is barely perturbed on off-topic prompts, so concepts don't hijack the model. (2) The mean
+KL (0.19-0.23) sits well above the median: a **few** control prompts move a lot (max 3-7 nats) while
+**most barely move** — expected, since some templates embed the entity name in the task itself
+(translation/echo), where injecting its concepts legitimately shifts output. (3) **Greedy-agreement
+~28-34% looks modest only because it is a strict 32-token exact match** (one flipped token zeroes the
+row and errors compound over 32 steps); it does NOT trend down with k, so there is no capacity-driven
+degradation. **KL is the faithful measure here, and it says capability is preserved.** This is by
+design: gate-none zero-inits the encoder output projection, so at step 0 the student is bit-identical
+to the frozen LLM (`model/injection.py`, `model/conceptformer.py`).
+
+**Caveats.** 1 seed/k. 32-token exact-match is a blunt agreement metric (a first-token or short-window
+agreement would read higher); the paper should headline **median KL**, report agreement as secondary.
+Control prompts are templated, not Gemma-generated (the 100k corpus lacks control tasks) — fine for a
+distributional-perturbation probe, but not a natural-distribution capability benchmark.
+
+**Re-verify:** `scripts/phaseF_capability_sweep.sh` (`cf-capability-preservation --checkpoint
+pc_k{k}_s1_best --n 400`) -> `data/analysis/capability_preservation.json`; clean signal is median
+KL 0.06-0.08 nats, flat across k (not blowing up at k32).
 
 ---
 
 ## Open questions (not yet evidence-backed — do NOT state as findings)
 
-0. **TOP PRIORITY — establish the noise floor + re-test downgraded findings multi-seed (F8).** Run
-   key configs ×3 seeds (now that torch is seeded) to get mean±std, then re-decide F1 (capacity),
-   F2 (k), F7 (augment), and the placement ablation against the noise band. Also probe whether the
-   init sensitivity can be *reduced* (gate warmup / lower gate-LR / EMA) so fewer seeds are needed.
-1. Do the capacity/k orderings hold at convergence (cached, ~60k+ steps)? (sweeps were 24k, undertrained)
-2. ~~Does `sub_on` match `sub_off` on robustness?~~ **RESOLVED → F3/F5**: yes (slightly worse);
-   subsample question fully closed.
-3. ~~Does `--augment` help?~~ **RE-OPENED → F8**: the +7.7 in F7 flips to −6.5 on another init, so
-   augment's effect is unproven (within noise). Must be re-tested ×3 seeds before any claim.
-3b. ⛔ NOT YET EVIDENCE-BACKED — **Concept-vector placement.** Does *where* the k concept tokens sit
-   in the user message matter? Modes: `prefix` (current baseline), `before_entity`, `after_entity`,
-   `replace_entity` (entity surface form removed → concepts must fully substitute). Entity is
-   verbatim in 100% of questions, so all modes run on the full corpus. Needs a `placement` config +
-   per-example student head. Hypothesis: adjacency/replacement improves entity↔knowledge binding.
-4. Does 10×-wider data (100k entities) lift the ~40% held-out / 18% PopQA ceiling? ⛔ NOT YET
-   EVIDENCE-BACKED. Snapshot **built and staged** — `data/snapshots/cftrain_100k`, 100,000 usable
-   subgraphs (261,475 candidates, 38% pass), sha256 `ee4850f5633d8aa2a374bb9e145ce10675870274e7b25ca5bf0c5f545e60242c`.
-   Gemma QA generation + teacher extraction **NOT started** — deliberately gated on Q2/Q3 (robustness).
+0. ~~Establish the noise floor + re-test downgraded findings multi-seed (F8).~~ **RESOLVED → F8 +
+   Phase 3.** Noise floor measured (~1 pt std on the locked config); F1/F2/F7/placement all re-tested
+   ×3 seeds (→ F1 re-established, F2 refuted/reframed, F7 underpowered, F9 placement). Sensitivity
+   reduced by gate-none + grad-accum (NOT determinism).
+1. ~~Do the capacity/k orderings hold at convergence?~~ **RESOLVED → F1/F2** (re-run ×3 seeds @72k on
+   the stabilized base): capacity peak ~70M holds; the k-curve is monotone (no knee) — the *opposite*
+   of the old undertrained sweep, confirming the undertraining caveat.
+2. ~~Does `sub_on` match `sub_off` on robustness?~~ **RESOLVED → F3/F5**: yes (slightly worse).
+3. ~~Does `--augment` help?~~ **RESOLVED → F7 (re-tested ×3)**: underpowered — point estimates trend
+   positive (+3.8–5.8 pt held-out) but inside the ~6–9-pt cross-prompt seed variance; not significant
+   at n=3. Not in the recipe; revisit n≥6 in Phase 4 if needed.
+3b. ~~Concept-vector placement?~~ **RESOLVED → F9**: placement doesn't help; `prefix` best on accuracy,
+   `replace_entity` worse + unstable. `before_entity` ADOPTED as the recipe placement (within-noise of
+   prefix, multi-entity-extensible). Adjacency/replacement-improves-binding hypothesis refuted.
+4. Does 10×-wider data (100k entities) lift the ~40% held-out / 18% PopQA ceiling? 🟡 **IN PROGRESS →
+   F11 + Phase C.** 100k corpus **GENERATED** (`cftrain_qa_100k`, 925,178 distill rows; snapshot
+   `cftrain_100k` sha256 `ee4850f5633d8aa2a374bb9e145ce10675870274e7b25ca5bf0c5f545e60242c`). Early
+   signal positive (still climbing past where 10k would, F11), but the **converged** comparison is
+   being trained now (group `phaseC-kfamily-100k`). Do NOT claim a 100k ceiling yet.
+5. **Token-efficiency headline figure (Phase D, deferred).** Concept k-curve (converged, from Phase C)
+   vs a REALISTIC text-RAG accuracy-vs-token-budget curve on the same axis (knowledge tokens). Measured
+   fact-token cost: median 100, mean 125 (F2). Use top-PageRank `verbalize_budgeted` (NO answer
+   guarantee) at budgets {8,16,32,64,~100} — the answer-guaranteed teacher stays near-ceiling at tiny
+   budgets and would rig it. NOT yet run.
+6. **Does it LEARN THE GRAPH or just compress text? (Phase E — harness BUILT, not yet run.)** Causal
+   graph interventions on a trained checkpoint (`cf-graph-faithfulness`, pure helpers in
+   `eval/counterfactual.py`, 5 unit tests): (a) **counterfactual swap** — replace the answer edge's
+   neighbor with a type-plausible FALSE entity; a graph-faithful model follows it to the false answer
+   (high swap-follow), whereas a text-memoriser or one leaning on the frozen LLM's parametric
+   knowledge sticks to the original; (b) **edge ablation** — drop the answer edge → accuracy on THAT
+   question collapses while removing an UNRELATED edge leaves it intact (edges encoded separably, not
+   as one entangled blob). Pre-registered success = high swap-follow + low answer-ablation accuracy +
+   high other-ablation accuracy. Falsifiers: swaps don't change the answer (memory/entangled), or
+   ablation degrades uniformly. Run on `pc_k8_best` when a GPU frees. This is the paper's "it reads
+   the graph" proof; the swap-to-FALSE design also disentangles concepts from the LLM's own memory.

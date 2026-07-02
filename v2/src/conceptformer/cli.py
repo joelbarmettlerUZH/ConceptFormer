@@ -287,6 +287,7 @@ def extract_teacher_paths(
         CFTRAIN_PROMPT_VERSION,
         attach_teacher_paths,
         drop_degenerate_paths,
+        teacher_path_key,
         teacher_prompt,
     )
     from conceptformer.model.chat import ChatModel
@@ -298,14 +299,37 @@ def extract_teacher_paths(
 
     chat = ChatModel(model, device=device, cache=KVCache(settings.generation_cache_path))
     budget = settings.rag_context_tokens
-    prompts = []
+    prompts: list[tuple[str, str]] = []  # (system, user) per row
     for r in rows:
         sg = sg_by_qid.get(r.subject_qid)
         # Guarantee the answer's edge is in the teacher's facts (large neighborhoods can cut it).
         facts = verbalize_with_answer(sg, r.answer_qid, chat.count_tokens, budget) if sg else ""
         prompts.append(teacher_prompt(r.question, facts))
 
-    ids = chat.generate_batch_ids(prompts, max_new_tokens=max_new_tokens, batch_size=batch_size)
+    # RESUMABLE: per-row cache the greedy path, generate only uncached rows, FLUSH the cache after
+    # each chunk — a kill mid-run loses at most one chunk, a re-run skips what's done (the full
+    # extract is ~12h on 100k, ~40h on 1M, so this is essential, not optional).
+    path_cache = KVCache(settings.generation_cache_path)
+    keys = [teacher_path_key(model, max_new_tokens, f"{sys}\n{user}") for sys, user in prompts]
+    ids: list[list[int]] = [[] for _ in prompts]
+    todo: list[tuple[int, tuple[str, str]]] = []
+    for i, k in enumerate(keys):
+        hit = path_cache.get(k)
+        if hit is not None:
+            ids[i] = hit["ids"]
+        else:
+            todo.append((i, prompts[i]))
+    rprint(f"[dim]teacher paths: {len(prompts) - len(todo)}/{len(prompts)} cached; "
+           f"generating {len(todo)}…[/dim]")
+    flush = max(batch_size, 1) * 16  # cache-flush granularity (~16 batches)
+    for c in range(0, len(todo), flush):
+        chunk = todo[c : c + flush]
+        gen = chat.generate_batch_ids(
+            [p for _, p in chunk], max_new_tokens=max_new_tokens, batch_size=batch_size
+        )
+        for (i, _), g in zip(chunk, gen, strict=True):
+            ids[i] = list(g)
+        path_cache.put_many({keys[i]: {"ids": ids[i]} for i, _ in chunk})
     texts = [chat.decode(i) for i in ids]
     enriched = attach_teacher_paths(rows, ids, texts)
     enriched, n_degenerate = drop_degenerate_paths(enriched)  # no empty/whitespace targets
@@ -449,8 +473,14 @@ def generate_cftrain(
         f"({n_questions} QA + {descriptive} desc + {control} ctrl)…"
     )
 
-    client = GemmaClient(base_url=base_url, n_questions=n_questions)
+    # Per-entity cache → the run resumes after a crash instead of redoing completed entities
+    # (the 100k corpus is a ~10h generation; a single save-at-end would lose it all on a failure).
+    from conceptformer.cache import KVCache
+
+    gen_cache = KVCache(settings.generation_cache_path)
+    client = GemmaClient(base_url=base_url, n_questions=n_questions, cache=gen_cache)
     results = asyncio.run(client.generate(sgs))
+    gen_cache.close()
     rows = validate_questions(sgs, results)
     for sg in sgs:  # descriptive + control need no LLM; add for every entity
         rows.extend(descriptive_tasks(sg, n=descriptive))
@@ -614,6 +644,28 @@ def cf_overfit(
     rprint(f"[green]done[/] — KL {first:.4f} → {loss:.4f}")
 
 
+def log_artifact_resilient(wb: object, art: object, label: str, retries: int = 3,
+                           base_delay: float = 5.0) -> bool:
+    """Log a W&B artifact, retrying transient failures; on final failure WARN instead of raising.
+
+    A flaky W&B upload (service process timing out — seen 2026-07-02) must NEVER crash an already-
+    completed training run: the checkpoint is saved LOCALLY before this is called, so on failure we
+    just warn and the run finishes cleanly (re-upload later). Returns True on success."""
+    import time
+
+    for attempt in range(retries):
+        try:
+            wb.log_artifact(art)  # ty: ignore[unresolved-attribute]
+            return True
+        except Exception as e:  # broad on purpose — a flaky upload must not kill a finished run
+            if attempt + 1 < retries:
+                time.sleep(base_delay * (attempt + 1))
+            else:
+                rprint(f"[yellow]W&B artifact upload failed for {label} after {retries} tries "
+                       f"({type(e).__name__}); checkpoint saved LOCALLY — reupload later.[/]")
+    return False
+
+
 @app.command("cf-train")
 def cf_train(
     dataset: Annotated[str, typer.Option(help="distilled CF-Train dataset")] = "cftrain_qa_smoke",
@@ -623,6 +675,9 @@ def cf_train(
     d_model: Annotated[int, typer.Option(help="encoder width")] = 512,
     n_layers: Annotated[int, typer.Option(help="resampler layers")] = 2,
     lr: Annotated[float, typer.Option(help="encoder learning rate")] = 1e-4,
+    weight_decay: Annotated[float, typer.Option(help="AdamW weight decay")] = 0.01,
+    warmup_frac: Annotated[float, typer.Option(help="warmup as a fraction of total steps")] = 0.05,
+    schedule: Annotated[str, typer.Option(help="post-warmup LR decay: cosine|constant")] = "cosine",
     temperature: Annotated[float, typer.Option(help="KL distillation temperature")] = 1.0,
     steps: Annotated[int, typer.Option()] = 600,
     batch: Annotated[int, typer.Option(help="minibatch size")] = 8,
@@ -634,6 +689,10 @@ def cf_train(
     checkpoint: Annotated[str, typer.Option(help="save trained encoder under this name")] = "",
     augment: Annotated[bool, typer.Option(help="distill under many system prompts")] = False,
     subsample: Annotated[bool, typer.Option(help="re-sample teacher distractors/step")] = False,
+    cache_teacher: Annotated[
+        bool,
+        typer.Option(help="cache teacher hidden upfront; --no for large-data/few-epoch"),
+    ] = True,
     placement: Annotated[
         str,
         typer.Option(help="concept slot: prefix|before_entity|after_entity|replace_entity"),
@@ -694,12 +753,15 @@ def cf_train(
         d_model=d_model,
         n_layers=n_layers,
         lr=lr,
+        weight_decay=weight_decay,
+        schedule=schedule,
         temperature=temperature,
-        warmup_steps=max(10, steps // 20),
+        warmup_steps=max(10, int(steps * warmup_frac)),
         total_steps=steps,
         rag_context_tokens=1024,
         augment_systems=AUGMENT_SYSTEMS if augment else (),
         subsample_neighbors=subsample,
+        cache_teacher=cache_teacher,
         placement=placement,
         grad_clip=grad_clip,
         grad_accum=grad_accum,
@@ -719,10 +781,12 @@ def cf_train(
             name=checkpoint or None,
             config={
                 "k": k, "d_model": d_model, "n_layers": n_layers, "lr": lr,
+                "weight_decay": weight_decay, "schedule": schedule, "warmup_frac": warmup_frac,
                 "gate_lr": cfg.gate_lr, "temperature": temperature, "ce_weight": cfg.ce_weight,
                 "steps": steps, "batch": batch, "warmup_steps": cfg.warmup_steps,
                 "rag_context_tokens": cfg.rag_context_tokens, "val_frac": val_frac,
                 "eval_n": eval_n, "augment": augment, "subsample": subsample,
+                "cache_teacher": cache_teacher,
                 "placement": placement, "grad_clip": grad_clip, "grad_accum": grad_accum,
                 "effective_batch": batch * grad_accum,
                 "ema_decay": ema_decay,
@@ -838,6 +902,11 @@ def cf_train(
     eff_batch = batch * accum  # sample the whole effective batch, then split into `accum` micros
     trainer.setup_eval(eval_val, sg_by_qid, eval_system=eval_system)  # brackets computed once
     report("init", 0)
+    # Best-held-out checkpoint: at a generous horizon the model can overfit PAST its peak (F4), so
+    # the FINAL weights may be worse than the best. Save the best-so-far separately (overwrites one
+    # file) when held-out improves; that is the "checkpoint-selected" model downstream evals need.
+    best_ho = -1.0
+    best_path = settings.data_root / "checkpoints" / f"{checkpoint}_best.pt" if checkpoint else None
     for s in range(1, steps + 1):
         sample = rng.sample(train_pool, min(eff_batch, len(train_pool)))
         loss = accum_fn(split_microbatches(sample, accum)) if accum > 1 else step_fn(sample)
@@ -851,7 +920,10 @@ def cf_train(
                 step_log[f"train/lr_{grp.get('name', 'g')}"] = grp["lr"]
             wb.log(step_log, step=s)
         if s % eval_every == 0 or s == steps:
-            report(f"step {s}", s)
+            m = report(f"step {s}", s)
+            if best_path is not None and m["concept_acc"] > best_ho:
+                best_ho = m["concept_acc"]
+                trainer.save_checkpoint(best_path)  # EMA off for this config → current == evaluated
 
     # held-in / PopQA were scored every checkpoint inside report() (full trajectories in W&B).
     # Echo the final overfit-vs-underfit read and mirror the converged values into the summary.
@@ -871,6 +943,8 @@ def cf_train(
         )
     if wb:
         wb.summary["held_out/concept_acc_final"] = last_metrics.get("concept_acc")
+        if best_path is not None:
+            wb.summary["held_out/concept_acc_best"] = best_ho  # the checkpoint-selected value
         if hi_final is not None:
             wb.summary["held_in/concept_acc"] = hi_final
             wb.summary["held_in/val_kl"] = last_metrics.get("held_in_val_kl")
@@ -898,8 +972,18 @@ def cf_train(
                 },
             )
             art.add_file(str(ckpt_path))
-            wb.log_artifact(art)
-            rprint(f"[green]logged W&B artifact[/] model:{checkpoint}")
+            if log_artifact_resilient(wb, art, f"model:{checkpoint}"):
+                rprint(f"[green]logged W&B artifact[/] model:{checkpoint}")
+        # The checkpoint-selected (best-held-out) model is the one downstream evals should use; push
+        # it as a separate artifact so it is durable independently of the final-step weights.
+        if wb and best_path is not None and best_path.exists():
+            best_art = _wandb.Artifact(
+                f"{checkpoint}_best", type="model",
+                metadata={"k": k, "held_out_concept_acc_best": best_ho, "selected": "best_ho"},
+            )
+            best_art.add_file(str(best_path))
+            if log_artifact_resilient(wb, best_art, f"model:{checkpoint}_best"):
+                rprint(f"[green]logged W&B artifact[/] model:{checkpoint}_best (ho={best_ho:.3f})")
 
     if wb:
         wb.finish()
@@ -1040,6 +1124,330 @@ def eval_prompt_robustness(
     rprint("[dim]low std + high min across prompts = prompt-robust concept vectors[/dim]")
 
 
+@app.command("cf-graph-faithfulness")
+def cf_graph_faithfulness(
+    checkpoint: Annotated[str, typer.Option(help="trained checkpoint name or path")],
+    dataset: Annotated[str, typer.Option()] = "cftrain_qa_100k",
+    snapshot: Annotated[str, typer.Option()] = "cftrain_100k",
+    n: Annotated[int, typer.Option(help="held-out single-fact questions to probe")] = 300,
+    val_frac: Annotated[float, typer.Option()] = 0.3,
+    seed: Annotated[int, typer.Option()] = 0,
+    model: Annotated[str, typer.Option()] = "Qwen/Qwen3-0.6B",
+    device: Annotated[str, typer.Option()] = "cuda",
+) -> None:
+    """Prove the model READS THE GRAPH (not just compresses text) via causal graph interventions.
+
+    On baseline-correct single-fact questions, two interventions on the INPUT graph (re-encoded each
+    time): (1) counterfactual SWAP of the answer edge's neighbor to a type-plausible FALSE entity —
+    a graph-faithful model follows it to the false answer (a text-memoriser, or one leaning on the
+    frozen LLM's parametric knowledge, would not); (2) ABLATE the answer edge — the model should
+    lose THAT answer while a removed UNRELATED edge leaves it intact (edges encoded separably).
+    """
+    import random
+
+    import torch
+
+    from conceptformer.data.snapshot import iter_subgraphs
+    from conceptformer.eval.counterfactual import (
+        ablate_neighbor,
+        answer_edge_property,
+        build_swap_pool,
+        matches,
+        pick_swap_target,
+        swap_edge_neighbor,
+    )
+    from conceptformer.generate.dataset import load_cftrain_qa
+    from conceptformer.generate.signal import answer_ok
+    from conceptformer.model.backbone import Backbone
+    from conceptformer.model.chat import ChatModel
+    from conceptformer.train.harness import split_by_held_out_questions
+    from conceptformer.train.trainer import TEACHER_SYSTEM, ConceptTrainer, TrainConfig
+
+    ckpt_path = Path(checkpoint)
+    if not ckpt_path.exists():
+        ckpt_path = settings.data_root / "checkpoints" / f"{checkpoint}.pt"
+    if not ckpt_path.exists():
+        import wandb as _wandb
+
+        rprint(f"[dim]checkpoint not local; pulling W&B artifact model:{checkpoint}:latest…[/dim]")
+        art = _wandb.Api().artifact(
+            f"university-of-zurich/conceptformer-v2/{checkpoint}:latest", type="model"
+        )
+        ckpt_path = Path(art.download()) / f"{checkpoint}.pt"
+    blob = torch.load(ckpt_path, map_location=device, weights_only=False)
+    cfg = TrainConfig(**blob["config"])
+    backbone = Backbone(ChatModel(model, device=device))
+    trainer = ConceptTrainer(backbone, cfg)
+    trainer.model.load_state_dict(blob["model"])
+    trainer.model.eval()
+
+    rows = load_cftrain_qa(settings.data_root / "cf_train" / dataset / "qa_distill.jsonl")
+    sg_by_qid = {sg.center.qid: sg for sg in iter_subgraphs(settings.snapshots_dir / snapshot)}
+    _, val_rows = split_by_held_out_questions(rows, val_frac=val_frac, seed=seed)
+    # Single-fact questions only: the answer maps to exactly one edge, so "the answer edge" is
+    # well-defined for swap/ablate. (Compositional questions span >1 edge — a separate probe.)
+    probes = [
+        r for r in val_rows
+        if r.task_type == "single" and r.answer_qid and r.subject_qid in sg_by_qid
+        and any(e.neighbor.qid == r.answer_qid for e in sg_by_qid[r.subject_qid].edges)
+    ]
+    rng = random.Random(seed)
+    rng.shuffle(probes)
+    probes = probes[:n]
+    pool = build_swap_pool(sg_by_qid.values())
+    rprint(f"[bold]graph-faithfulness[/] k={cfg.k}; {len(probes)} single-fact probes")
+
+    def gen(items: list[tuple]) -> list[str]:
+        return trainer.generate_student_batch(items, max_new=32, system=TEACHER_SYSTEM)
+
+    base_items = [(sg_by_qid[r.subject_qid], r.question) for r in probes]
+    base_out = gen(base_items)
+    correct = [answer_ok(o, r.accepted_answers) for o, r in zip(base_out, probes, strict=True)]
+    n_base = sum(correct)
+    # The frozen LLM with NO concepts: where it already knows the answer (memory), the swap test is
+    # confounded. Splitting by base-known vs base-UNKNOWN isolates pure graph-reading.
+    base_text = trainer._generate_text_batch([(TEACHER_SYSTEM, r.question) for r in probes], 32)
+    base_known = [answer_ok(o, r.accepted_answers) for o, r in zip(base_text, probes, strict=True)]
+
+    # Build the three interventions, but only on baseline-CORRECT probes (otherwise the deltas are
+    # meaningless). swap_meta carries the base-known flag so swap-follow can be split by memory.
+    swap_items, swap_meta = [], []  # (probe, true_neighbor, swapped_neighbor, base_known)
+    abl_ans_items, abl_ans_meta = [], []
+    abl_oth_items, abl_oth_meta = [], []
+    for r, ok, bk in zip(probes, correct, base_known, strict=True):
+        if not ok:
+            continue
+        aq = r.answer_qid
+        if aq is None:  # guaranteed by the probe filter; this narrows it for the manipulators
+            continue
+        sg = sg_by_qid[r.subject_qid]
+        true_n = next(e.neighbor for e in sg.edges if e.neighbor.qid == aq)
+        prop = answer_edge_property(sg, aq)
+        tgt = pick_swap_target(pool, prop, sg, aq, rng) if prop else None
+        if tgt is not None:
+            swap_items.append((swap_edge_neighbor(sg, aq, tgt), r.question))
+            swap_meta.append((r, true_n, tgt, bk))
+        abl_ans_items.append((ablate_neighbor(sg, aq), r.question))
+        abl_ans_meta.append(r)
+        others = [e.neighbor.qid for e in sg.edges if e.neighbor.qid != r.answer_qid]
+        if others:
+            abl_oth_items.append((ablate_neighbor(sg, rng.choice(others)), r.question))
+            abl_oth_meta.append(r)
+
+    swap_out = gen(swap_items)
+    follow = sum(matches(o, m[2]) for o, m in zip(swap_out, swap_meta, strict=True))
+    stick = sum(matches(o, m[1]) for o, m in zip(swap_out, swap_meta, strict=True))
+    # Base-UNKNOWN subset: LLM can't answer from memory, so following the swap = pure graph-reading.
+    unk = [(o, m) for o, m in zip(swap_out, swap_meta, strict=True) if not m[3]]
+    unk_follow = sum(matches(o, m[2]) for o, m in unk)
+    unk_stick = sum(matches(o, m[1]) for o, m in unk)
+    abl_ans_out = gen(abl_ans_items)
+    abl_ans_ok = sum(
+        answer_ok(o, r.accepted_answers) for o, r in zip(abl_ans_out, abl_ans_meta, strict=True)
+    )
+    abl_oth_out = gen(abl_oth_items)
+    abl_oth_ok = sum(
+        answer_ok(o, r.accepted_answers) for o, r in zip(abl_oth_out, abl_oth_meta, strict=True)
+    )
+
+    pct = lambda a, b: f"{(a / b if b else 0):.1%}"  # noqa: E731
+    rprint(f"  baseline correct: {pct(n_base, len(probes))} ({n_base}/{len(probes)})  "
+           f"| base-only (no concepts) knows: {pct(sum(base_known), len(probes))}")
+    rprint("  [bold]counterfactual swap[/] (answer edge → false neighbor):")
+    rprint(f"    ALL: follows swap (→ FALSE) [bold]{pct(follow, len(swap_meta))}[/]  "
+           f"sticks to original {pct(stick, len(swap_meta))}  (n={len(swap_meta)})")
+    rprint(f"    [bold]base-UNKNOWN[/] (no parametric memory → clean graph test): "
+           f"follows swap [bold]{pct(unk_follow, len(unk))}[/]  sticks {pct(unk_stick, len(unk))}  "
+           f"(n={len(unk)})")
+    rprint("  [bold]edge ablation[/] (of baseline-correct):")
+    rprint(f"    correct after removing ANSWER edge: [bold]{pct(abl_ans_ok, len(abl_ans_meta))}[/]"
+           f" (n={len(abl_ans_meta)})  — want LOW")
+    rprint(f"    correct after removing OTHER edge:  [bold]{pct(abl_oth_ok, len(abl_oth_meta))}[/]"
+           f" (n={len(abl_oth_meta)})  — want HIGH (~baseline)")
+    rprint("[dim]high swap-follow + (low answer-ablation, high other-ablation) = reads the graph "
+           "edge-by-edge, not entangled text / parametric memory.[/dim]")
+
+
+@app.command("cf-capability-preservation")
+def cf_capability_preservation(
+    checkpoint: Annotated[str, typer.Option(help="trained checkpoint name or path")],
+    dataset: Annotated[str, typer.Option()] = "cftrain_qa_100k",
+    snapshot: Annotated[str, typer.Option()] = "cftrain_100k",
+    n: Annotated[int, typer.Option(help="held-out CONTROL tasks to probe")] = 300,
+    val_frac: Annotated[float, typer.Option()] = 0.3,
+    seed: Annotated[int, typer.Option()] = 0,
+    model: Annotated[str, typer.Option()] = "Qwen/Qwen3-0.6B",
+    device: Annotated[str, typer.Option()] = "cuda",
+) -> None:
+    """Does injecting concept tokens DEGRADE the frozen LLM's normal generation? (is it preserved?)
+
+    On held-out CONTROL tasks (the entity is named but the task is NOT about its facts, so concepts
+    SHOULD be inert), compares the frozen model WITH concepts vs WITHOUT (base): greedy-agreement
+    (same continuation?) and the mean KL of the next-token distribution. High agreement + low KL =
+    the concept tokens don't disturb the model's normal behaviour = capability preserved.
+    """
+    import random
+
+    import torch
+
+    from conceptformer.data.snapshot import iter_subgraphs
+    from conceptformer.generate.dataset import load_cftrain_qa
+    from conceptformer.model.backbone import Backbone
+    from conceptformer.model.chat import ChatModel
+    from conceptformer.model.featurizer import featurize_subgraph
+    from conceptformer.model.injection import build_position_ids
+    from conceptformer.train.harness import split_by_held_out_questions
+    from conceptformer.train.trainer import TEACHER_SYSTEM, ConceptTrainer, TrainConfig
+
+    ckpt_path = Path(checkpoint)
+    if not ckpt_path.exists():
+        ckpt_path = settings.data_root / "checkpoints" / f"{checkpoint}.pt"
+    blob = torch.load(ckpt_path, map_location=device, weights_only=False)
+    cfg = TrainConfig(**blob["config"])
+    trainer = ConceptTrainer(Backbone(ChatModel(model, device=device)), cfg)
+    trainer.model.load_state_dict(blob["model"])
+    trainer.model.eval()
+
+    rows = load_cftrain_qa(settings.data_root / "cf_train" / dataset / "qa_distill.jsonl")
+    sg_by = {sg.center.qid: sg for sg in iter_subgraphs(settings.snapshots_dir / snapshot)}
+    _, val = split_by_held_out_questions(rows, val_frac=val_frac, seed=seed)
+    ctrl = [r for r in val if r.task_type == "control" and r.subject_qid in sg_by]
+    rng = random.Random(seed)
+    if ctrl:
+        rng.shuffle(ctrl)
+        items = [(sg_by[r.subject_qid], r.question) for r in ctrl[:n]]
+    else:
+        # Corpora past 10k skip control-task generation; synthesize the same off-topic prompts
+        # (control.py's template bank) over held-out entities so the test still runs.
+        from conceptformer.generate.control import control_tasks
+
+        val_qids = list(dict.fromkeys(r.subject_qid for r in val if r.subject_qid in sg_by))
+        rng.shuffle(val_qids)
+        items = []
+        for qid in val_qids:
+            for t in control_tasks(sg_by[qid], n=1, seed=seed):
+                items.append((sg_by[qid], t.question))
+            if len(items) >= n:
+                break
+        items = items[:n]
+
+    # greedy: does injecting concepts change the continuation vs the frozen model alone?
+    concept_out = trainer.generate_student_batch(items, max_new=32, system=TEACHER_SYSTEM)
+    base_out = trainer._generate_text_batch([(TEACHER_SYSTEM, q) for _, q in items], 32)
+    agree = sum(c.strip() == b.strip() for c, b in zip(concept_out, base_out, strict=True))
+
+    # next-token KL(concept || base) at the prompt end — how far concepts perturb the distribution.
+    @torch.no_grad()
+    def last_logits(with_concepts: bool) -> torch.Tensor:
+        feats = [featurize_subgraph(sg, trainer.bb.embed_labels) for sg, _ in items]
+        concepts = trainer._encode_concepts(feats) if with_concepts else None
+        seqs = []
+        for i, (sg, q) in enumerate(items):
+            label = sg.center.label or sg.center.qid
+            head, tail = trainer._student_split(TEACHER_SYSTEM, q, label)
+            parts = [trainer._embed(head)]
+            if concepts is not None:
+                parts.append(concepts[i])
+            parts.append(trainer._embed(tail))
+            seqs.append(torch.cat(parts, dim=0))
+        emb, attn = trainer._left_pad_embeds(seqs)  # right-aligned → last col is the prompt end
+        hid = trainer.bb.forward_hidden(emb, attn, build_position_ids(attn))
+        return trainer.bb.lm_head(hid[:, -1, :]).float()
+
+    lc, lb = last_logits(True), last_logits(False)
+    # KL(base || concept) per row — how far concepts pull the next-token dist from the frozen model.
+    kl = torch.nn.functional.kl_div(
+        torch.log_softmax(lc, -1), torch.log_softmax(lb, -1),
+        reduction="none", log_target=True,
+    ).sum(-1)
+
+    rprint(f"[bold]capability preservation[/] {ckpt_path.name} k={cfg.k}; {len(items)} controls")
+    rprint(f"  greedy-agreement (concept == base output): [bold]{agree / len(items):.1%}[/]")
+    rprint(f"  next-token KL(base-concept): mean [bold]{kl.mean():.4f}[/] "
+           f"median {kl.median():.4f} max {kl.max():.3f}")
+    rprint("[dim]high agreement + low KL = concept tokens inert on non-fact tasks = preserved.[/]")
+
+
+@app.command("cf-rag-budget-curve")
+def cf_rag_budget_curve(
+    dataset: Annotated[str, typer.Option()] = "cftrain_qa_100k",
+    snapshot: Annotated[str, typer.Option()] = "cftrain_100k",
+    popqa_snapshot: Annotated[str, typer.Option()] = "popqa_full",
+    budgets: Annotated[str, typer.Option(help="fact-token budgets; 0 = base/no-facts")] =
+    "0,8,16,32,64,128,2048",
+    eval_n: Annotated[int, typer.Option()] = 300,
+    popqa_n: Annotated[int, typer.Option()] = 300,
+    val_frac: Annotated[float, typer.Option()] = 0.3,
+    seed: Annotated[int, typer.Option()] = 0,
+    model: Annotated[str, typer.Option()] = "Qwen/Qwen3-0.6B",
+    device: Annotated[str, typer.Option()] = "cuda",
+    out: Annotated[str, typer.Option(help="write JSON here")] = "",
+) -> None:
+    """Text-RAG accuracy vs its INPUT-TOKEN budget — the baseline half of the token-efficiency plot.
+
+    The frozen LLM reads facts as text at each budget, using REALISTIC retrieval (top-PageRank
+    `verbalize_budgeted`, NO answer guarantee — so cutting the budget can drop the answer fact,
+    unlike the training teacher). Reports accuracy AND median knowledge-token cost per budget, on
+    held-out questions AND unseen-entity PopQA. Overlay vs the concept k-curve (k tokens) to get
+    accuracy-vs-token-cost. budget 0 = base (no facts).
+    """
+    import json
+    import random
+
+    from conceptformer.data.benchmarks import load_popqa
+    from conceptformer.data.snapshot import iter_subgraphs
+    from conceptformer.generate.dataset import load_cftrain_qa
+    from conceptformer.generate.signal import answer_ok
+    from conceptformer.generate.teacher import cftrain_prompt
+    from conceptformer.model.chat import ChatModel
+    from conceptformer.train.harness import split_by_held_out_questions
+    from conceptformer.verbalize import verbalize_budgeted
+
+    chat = ChatModel(model, device=device)
+    budget_list = [int(b) for b in budgets.split(",")]
+
+    # held-out: (subgraph, question, accepted_answers)
+    rows = load_cftrain_qa(settings.data_root / "cf_train" / dataset / "qa_distill.jsonl")
+    sg_by = {sg.center.qid: sg for sg in iter_subgraphs(settings.snapshots_dir / snapshot)}
+    _, val = split_by_held_out_questions(rows, val_frac=val_frac, seed=seed)
+    rng = random.Random(seed)
+    ho = [(sg_by[r.subject_qid], r.question, r.accepted_answers) for r in val
+          if r.subject_qid in sg_by and r.accepted_answers]
+    rng.shuffle(ho)
+    ho = ho[:eval_n]
+
+    # PopQA (unseen entities)
+    pq_sg = {sg.center.qid: sg for sg in iter_subgraphs(settings.snapshots_dir / popqa_snapshot)}
+    pq = [(pq_sg[e.subject_qid], e.question, e.answer_labels) for e in load_popqa()
+          if e.subject_qid in pq_sg and e.answer_labels and pq_sg[e.subject_qid].edges]
+    rng.shuffle(pq)
+    pq = pq[:popqa_n]
+
+    def curve(items: list[tuple], tag: str) -> list[dict]:
+        rprint(f"[bold]RAG-budget — {tag}[/] (n={len(items)}):")
+        rprint(f"  {'budget':>7} {'acc':>7} {'med_tokens':>11}")
+        rows_out = []
+        for b in budget_list:
+            facts = ["" if b == 0 else verbalize_budgeted(sg, chat.count_tokens, b)
+                     for sg, _, _ in items]
+            prompts = [cftrain_prompt(q, f or None)
+                       for (_, q, _), f in zip(items, facts, strict=True)]
+            gen = chat.generate_batch_ids(prompts, max_new_tokens=32, batch_size=64)
+            preds = [chat.decode(g) for g in gen]
+            ok = sum(answer_ok(p, ans) for p, (_, _, ans) in zip(preds, items, strict=True))
+            acc = ok / len(items)
+            med = sorted(chat.count_tokens(f) for f in facts)[len(facts) // 2]
+            rprint(f"  {b:>7} {acc:>7.1%} {med:>11}")
+            rows_out.append({"budget": b, "acc": round(acc, 4), "median_knowledge_tokens": med})
+        return rows_out
+
+    report = {"held_out": curve(ho, "held-out"), "popqa": curve(pq, "PopQA (unseen)"),
+              "model": model, "dataset": dataset}
+    if out:
+        Path(out).write_text(json.dumps(report, indent=2))
+        rprint(f"[green]wrote[/] {out}")
+
+
 @app.command("cf-sweep")
 def cf_sweep(
     params: Annotated[str, typer.Option(help="spec: 'd-model=512,768,1024;n-layers=2,3,4'")],
@@ -1052,6 +1460,9 @@ def cf_sweep(
     popqa_eval: Annotated[int, typer.Option(help="PopQA examples per run (0=skip)")] = 0,
     augment: Annotated[bool, typer.Option()] = False,
     subsample: Annotated[bool, typer.Option(help="re-sample teacher distractors each step")] = True,
+    cache_teacher: Annotated[
+        bool, typer.Option(help="cache teacher hidden upfront; --no for large-data/few-epoch")
+    ] = True,
     method: Annotated[str, typer.Option(help="grid / random / bayes")] = "bayes",
     count: Annotated[int, typer.Option(help="max trials per agent (0=until stopped)")] = 0,
     devices: Annotated[str, typer.Option(help="comma-separated GPUs")] = "cuda:0,cuda:1",
@@ -1092,6 +1503,8 @@ def cf_sweep(
         fixed.append("--augment")
     if subsample:
         fixed.append("--subsample")
+    if not cache_teacher:
+        fixed.append("--no-cache-teacher")
     sweep_config = {
         "name": name,
         "method": method,
