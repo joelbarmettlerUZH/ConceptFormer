@@ -28,10 +28,45 @@ Last updated: 2026-07-02 (evening). Companion to `docs/RESEARCH_FINDINGS.md` (th
 >   +9.2 pt with scale; untrained injection near-floor (0.130) => the encoder is the effect;
 >   concepts beat question-aware retrieval + LLM summaries 2.6-3.2x at 8 tokens; "k16 plateau"
 >   refuted (monotone thru k32, McNemar p~9e-38). Seed-std collapsed (old 4-8 pt was eval noise).
-> - **NEXT: write the grant** from GRANT_ANALYSIS Sec 8 (niche: scaling laws of knowledge
->   injection — entities x Qwen3 sizes; secondary: VLM image-pathway injection). Then (post-
->   grant or if GPUs idle): 300k go/no-go with eval-final (now decisive at CI ~0.8 pt). 300k
->   corpus extract still resumable per the PAUSED banner below.
+> - **GRANT DRAFT WRITTEN:** `docs/GRANT_PROPOSAL_DRAFT.md` (Swiss AI Initiative small grant,
+>   30k GH200-h; research plan + itemized compute appendix anchored in measured wall-clocks;
+>   open: PI name, team, multi-node evidence). Target family switched to **Qwen3.5** (all sizes
+>   natively multimodal; MoE members add total-vs-active axis).
+> - **QWEN3.5-0.8B PILOT RUNNING (2026-07-02 night):** goal = de-risk the family migration +
+>   the image-port aim before submission. Done: multimodal Backbone/ChatModel adapter
+>   (model.model.language_model routing; M-RoPE -> position_ids=None for text-only; EXACT
+>   logit match verified; 236 tests green), fast kernels installed (flash-linear-attention +
+>   causal-conv1d, in infer group), 10k corpus re-tiered + teacher paths with the 0.8B teacher
+>   (`cftrain_qa_10k_q35b08`, 84,843 rows, ~1h with fla). RUNNING: text-port cf-train
+>   q35b08_k{8,16}_s{0,1}, 72k steps, group `pilot-qwen35-08b` (GPU0: s0 pair, GPU1: s1 pair).
+> - **PILOT TEXT-PORT DONE (2026-07-03, eval-final full PopQA):** q35b08 k8 held-out
+>   0.427/0.426, popqa 0.226/0.208; k16 held-out 0.519/0.493, popqa 0.254/0.294; brackets base
+>   0.124 / rag 0.943 (vs 0.6B anchors: ho 0.453, popqa 0.232, base 0.103). Migration
+>   de-risked: recipe transfers with ZERO HP retuning. Note: concept-over-base delta narrows
+>   (0.8B base is stronger + its tiered corpus is harder, 84,843 rows) — first real data point
+>   for the injection-vs-model-scale law; do NOT read as regression.
+> - **VISION PORT IMPLEMENTED + RUNNING (2026-07-03):** model/vision_port.py + Backbone
+>   mrope_position_ids/forward_cached + trainer injection_port=text|vision + manual KV-cached
+>   greedy decode (wrapper generate can't see spliced ids). Gotchas solved: image_grid_thw is
+>   in VISION-PATCH units -> grid (1, merge, merge*k) for k LLM tokens (merge =
+>   vision_config.spatial_merge_size = 2); ctx-length bug (path counted into ctx ->
+>   device-side assert) fixed + regression-tested (test_student_row.py). Smoke green; 4 runs
+>   RUNNING: q35b08_vis_k{8,16}_s{0,1}, group `pilot-qwen35-08b-vision`. 244 tests green.
+> - **PILOT COMPLETE (2026-07-03) -> F16.** Vision port evaluated + paired vs text port
+>   (`scripts/pilot_port_comparison.py`): parity at k8 (+-2.4 pt, mixed sign), trails at k16
+>   (-2.8/-7.0 held-out; one unstable seed). O4 framing updated in GRANT_PROPOSAL_DRAFT:
+>   feasible + non-trivial, scale-dependence is the funded question. Family migration
+>   de-risked (F16.1).
+> - **2B TRANSECT COMPLETE (2026-07-04) -> F16 addendum.** Headline: PopQA injection margin
+>   ANTI-SCALES with backbone size at fixed 10k data (k8: +12.9 @0.6B -> +9.4 @0.8B -> +5.1
+>   @2B; k16 halves 0.8B->2B) while held-out stays healthy — combined with the data axis
+>   (+12.9 -> +37.4 pt at 10k->100k), the surface's first structure. Port x scale: vision
+>   parity at k8 persists at 2B (no flip). Figure `data/analysis/pilot_scaling_surface.png`
+>   (`scripts/pilot_scaling_figure.py`); paired table `scripts/pilot_port_comparison.py`.
+>   Proposal draft preliminary-results updated. GPUs FREE again.
+> - **NEXT:** grant submission — only blanks left are PI name + team/multi-node evidence
+>   (user input). Then: 300k go/no-go with eval-final (decisive at CI ~0.8 pt); code commit on
+>   ask (vision port + adapters + M7 fixes since last commit are uncommitted).
 > - Sequencing decision (user, 2026-07-02): fixes -> related work/niche -> grant application.
 >   Multi-backbone + 300k/1M scale-up are the grant's asks, not pre-grant work.
 

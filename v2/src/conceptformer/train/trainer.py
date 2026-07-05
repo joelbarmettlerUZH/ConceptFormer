@@ -36,6 +36,12 @@ from conceptformer.model.featurizer import (
     featurize_subgraph,
 )
 from conceptformer.model.injection import ConceptGate, build_position_ids, pack_embeddings
+from conceptformer.model.vision_port import (
+    VisionPort,
+    image_grids,
+    mm_token_type_ids,
+    vision_block_ids,
+)
 from conceptformer.schemas import Subgraph
 from conceptformer.train.forcing import gather_path_logits
 from conceptformer.train.losses import sequence_cross_entropy, sequence_kl
@@ -166,6 +172,11 @@ class TrainConfig:
     # stand in for it). Non-prefix modes locate the entity by its label in the question text and
     # fall back to "prefix" if it isn't found verbatim. Teacher-side text is unchanged.
     placement: str = "prefix"
+    # Which frozen-model interface the concept tokens enter through: "text" (the embedding
+    # stream, default) or "vision" (between <vision_start>/<vision_end> at image-token
+    # positions with M-RoPE grid ids, exactly as a k-patch image would — multimodal backbones
+    # only; see model/vision_port.py for the faithfulness requirements).
+    injection_port: str = "text"
 
 
 @dataclass
@@ -269,6 +280,22 @@ class ConceptTrainer:
                 for n, p in self.model.named_parameters()
                 if p.requires_grad
             }
+        # Vision-port splice (multimodal backbones only): the special-token ids delimiting the
+        # pseudo-image block the concepts occupy. None = classic text-embedding injection.
+        self._vport: VisionPort | None = (
+            VisionPort.from_config(backbone.model.config)
+            if config.injection_port == "vision"
+            else None
+        )
+        # Vision-patch -> LLM-token merge factor; image_grids needs it so the pseudo-image
+        # resolves to exactly k LLM-side tokens (grids are specified in patch units).
+        self._vmerge: int = (
+            int(getattr(backbone.model.config.vision_config, "spatial_merge_size", 2))
+            if self._vport is not None
+            else 2
+        )
+        if config.injection_port not in ("text", "vision"):
+            raise ValueError(f"unknown injection_port {config.injection_port!r}")
         # Default eval set (held-out), populated by setup_eval; brackets static across training.
         self._eval: EvalSet | None = None
         self.last_grad_norm = 0.0  # pre-clip total grad-norm of the last step (logged each step)
@@ -337,6 +364,51 @@ class ConceptTrainer:
     def _embed(self, ids: list[int]) -> Tensor:
         return self.bb.embed_tokens(torch.tensor(ids, device=self.bb.device))
 
+    def _student_row(
+        self, head_ids: list[int], tail_ids: list[int], path: list[int], concept: Tensor
+    ) -> tuple[Tensor, int, list[int]]:
+        """One student sequence -> (embeddings, CONTEXT length, full ids incl. the path).
+
+        The context length excludes ``path`` (teacher-forced target tokens appended after the
+        prompt) — ``gather_path_logits`` indexes relative to it. Text port: ``[head][concepts]
+        [tail][path]``; the returned ids are empty (text positions come from the attention mask
+        alone). Vision port: the concepts sit at image-token positions inside a
+        ``[vision_start]..[vision_end]`` block; the ids are REAL and cover the whole row because
+        M-RoPE derives every position, path included, from them (``_student_positions``).
+        """
+        k = self.cfg.k
+        if self._vport is None:
+            emb = torch.cat([self._embed(head_ids), concept, self._embed(tail_ids + path)])
+            return emb, len(head_ids) + k + len(tail_ids), []
+        vp = self._vport
+        emb = torch.cat(
+            [
+                self._embed([*head_ids, vp.vision_start_id]),
+                concept,
+                self._embed([vp.vision_end_id, *tail_ids, *path]),
+            ]
+        )
+        ids = head_ids + vision_block_ids(vp, k) + tail_ids + path
+        return emb, len(head_ids) + k + 2 + len(tail_ids), ids
+
+    def _student_positions(self, ids_rows: list[list[int]], attn: Tensor) -> Tensor:
+        """Packed-batch position ids: mask-derived (text port) or M-RoPE grids (vision port)."""
+        if self._vport is None:
+            return build_position_ids(attn)
+        pad = int(self.bb.tokenizer.eos_token_id or 0)  # pad positions are attention-masked
+        ids = torch.full(
+            (len(ids_rows), int(attn.shape[1])), pad, dtype=torch.long, device=self.bb.device
+        )
+        for i, row in enumerate(ids_rows):
+            ids[i, : len(row)] = torch.tensor(row, dtype=torch.long, device=self.bb.device)
+        pos, _ = self.bb.mrope_position_ids(
+            ids,
+            mm_token_type_ids(ids, self._vport),
+            image_grids(len(ids_rows), self.cfg.k, self.bb.device, merge=self._vmerge),
+            attn,
+        )
+        return pos
+
     def _forward_kl(
         self,
         teacher_embeds: list[Tensor],
@@ -345,6 +417,7 @@ class ConceptTrainer:
         student_ctx: list[int],
         path_lens: list[int],
         paths: list[list[int]],
+        student_ids: list[list[int]],
     ) -> Tensor:
         """One padded forward each (teacher no-grad, student grad), gather paths, KL.
 
@@ -357,7 +430,8 @@ class ConceptTrainer:
             t_path, mask_m = gather_path_logits(t_hidden, teacher_ctx, path_lens)  # (B, m, d)
             teacher_g = self.bb.lm_head(t_path)  # (B, m, V)
         s_in, s_attn = pack_embeddings(student_embeds)
-        s_hidden = self.bb.forward_hidden(s_in, s_attn, build_position_ids(s_attn))
+        s_pos = self._student_positions(student_ids, s_attn)
+        s_hidden = self.bb.forward_hidden(s_in, s_attn, s_pos)
         s_path, _ = gather_path_logits(s_hidden, student_ctx, path_lens)
         student_g = self.bb.lm_head(s_path).float()
         loss = sequence_kl(student_g, teacher_g.float(), mask_m, temperature=self.cfg.temperature)
@@ -378,6 +452,7 @@ class ConceptTrainer:
         rng = self._sub_rng if self.cfg.subsample_neighbors else None
         teacher_embeds, teacher_ctx, path_lens = [], [], []
         student_embeds, student_ctx, paths = [], [], []
+        student_ids: list[list[int]] = []
         for i, (sg, question, path, answer_qid) in enumerate(batch):
             facts = self._facts(sg, answer_qid, rng)
             ctx_ids = self._ids(self._render(TEACHER_SYSTEM, f"{facts}\n\n{question}"))
@@ -387,12 +462,13 @@ class ConceptTrainer:
             teacher_ctx.append(len(ctx_ids))
             path_lens.append(len(path))
             paths.append(path)
-            student_embeds.append(
-                torch.cat([self._embed(head_ids), concepts[i], self._embed(tail_ids + path)])
-            )
-            student_ctx.append(len(head_ids) + self.cfg.k + len(tail_ids))
+            emb, ctx, ids = self._student_row(head_ids, tail_ids, path, concepts[i])
+            student_embeds.append(emb)
+            student_ctx.append(ctx)
+            student_ids.append(ids)
         return self._forward_kl(
-            teacher_embeds, teacher_ctx, student_embeds, student_ctx, path_lens, paths
+            teacher_embeds, teacher_ctx, student_embeds, student_ctx, path_lens, paths,
+            student_ids,
         )
 
     def _student_split(
@@ -478,12 +554,14 @@ class ConceptTrainer:
         otherwise the teacher is forwarded live (the large-data / few-epoch path)."""
         concepts = self._encode_concepts([self._feat_cache[p.qid] for p in batch])
         student_embeds, student_ctx, path_lens = [], [], []
+        student_ids: list[list[int]] = []
         for i, p in enumerate(batch):
-            head_emb = self._embed(p.student_head_ids)
-            student_embeds.append(
-                torch.cat([head_emb, concepts[i], self._embed(p.student_tail_ids + p.path)])
+            emb, ctx, ids = self._student_row(
+                p.student_head_ids, p.student_tail_ids, p.path, concepts[i]
             )
-            student_ctx.append(len(p.student_head_ids) + self.cfg.k + len(p.student_tail_ids))
+            student_embeds.append(emb)
+            student_ctx.append(ctx)
+            student_ids.append(ids)
             path_lens.append(len(p.path))
 
         if batch[0].teacher_hidden is not None:
@@ -491,7 +569,8 @@ class ConceptTrainer:
         else:
             teacher_g, mask_m = self._live_teacher(batch, path_lens)
         s_in, s_attn = pack_embeddings(student_embeds)
-        s_hidden = self.bb.forward_hidden(s_in, s_attn, build_position_ids(s_attn))
+        s_pos = self._student_positions(student_ids, s_attn)
+        s_hidden = self.bb.forward_hidden(s_in, s_attn, s_pos)
         s_path, _ = gather_path_logits(s_hidden, student_ctx, path_lens)
         student_g = self.bb.lm_head(s_path).float()
         loss = sequence_kl(student_g, teacher_g.float(), mask_m, temperature=self.cfg.temperature)
@@ -620,19 +699,80 @@ class ConceptTrainer:
         concepts = self._encode_concepts(
             [featurize_subgraph(sg, self.bb.embed_labels) for sg, _ in items]
         )
-        seqs = []
+        seqs, ids_rows = [], []
         for i, (sg, question) in enumerate(items):
             label = sg.center.label or sg.center.qid
             head_ids, tail_ids = self._student_split(system, question, label)
-            seqs.append(
-                torch.cat([self._embed(head_ids), concepts[i], self._embed(tail_ids)], dim=0)
-            )
+            emb, _ctx, ids = self._student_row(head_ids, tail_ids, [], concepts[i])
+            seqs.append(emb)
+            ids_rows.append(ids)
+        if self._vport is not None:
+            return self._generate_vision_batch(seqs, ids_rows, max_new)
         in_embeds, attn = self._left_pad_embeds(seqs)
         gen = self.bb.model.generate(
             inputs_embeds=in_embeds, attention_mask=attn, max_new_tokens=max_new,
             do_sample=False, pad_token_id=self.bb.tokenizer.eos_token_id,
         )
         return [t.strip() for t in self.bb.tokenizer.batch_decode(gen, skip_special_tokens=True)]
+
+    @torch.no_grad()
+    def _generate_vision_batch(
+        self, seqs: list[Tensor], ids_rows: list[list[int]], max_new: int
+    ) -> list[str]:
+        """Greedy decode for the vision port via a manual KV-cached loop.
+
+        The wrapper's ``generate`` derives M-RoPE from token ids, which spliced
+        ``inputs_embeds`` cannot carry — so we compute grid positions for the prefix with
+        ``mrope_position_ids`` and continue generated tokens at ``seq_len + step + delta``.
+        """
+        vp = self._vport
+        if vp is None:
+            raise RuntimeError("vision generation requires injection_port='vision'")
+        embeds, attn = self._left_pad_embeds(seqs)
+        batch, l_max = attn.shape
+        eos = int(self.bb.tokenizer.eos_token_id)
+        ids = torch.full((batch, l_max), eos, dtype=torch.long, device=self.bb.device)
+        for i, row in enumerate(ids_rows):
+            ids[i, l_max - len(row) :] = torch.tensor(
+                row, dtype=torch.long, device=self.bb.device
+            )
+        pos, deltas = self.bb.mrope_position_ids(
+            ids,
+            mm_token_type_ids(ids, vp),
+            image_grids(batch, self.cfg.k, self.bb.device, merge=self._vmerge),
+            attn,
+        )
+        out = self.bb.forward_cached(embeds.to(self.bb.dtype), attn, pos)
+        next_logits = self.bb.lm_head(out.last_hidden_state[:, -1])
+        past = out.past_key_values
+        deltas = deltas.view(-1).to(self.bb.device)
+        finished = torch.zeros(batch, dtype=torch.bool, device=self.bb.device)
+        collected: list[list[int]] = [[] for _ in range(batch)]
+        for step in range(max_new):
+            next_id = next_logits.argmax(dim=-1)  # (B,)
+            next_id = torch.where(finished, torch.full_like(next_id, eos), next_id)
+            for i, token in enumerate(next_id.tolist()):
+                if not bool(finished[i]):
+                    collected[i].append(int(token))
+            finished |= next_id == eos
+            if bool(finished.all()) or step == max_new - 1:
+                break
+            step_emb = self.bb.embed_tokens(next_id).unsqueeze(1)  # (B, 1, d)
+            attn = torch.cat(
+                [attn, torch.ones((batch, 1), dtype=attn.dtype, device=attn.device)], dim=1
+            )
+            # Generated tokens continue TEXT positions: all three M-RoPE planes equal, at
+            # seq_len + step + delta (delta = the grid's compression of absolute positions).
+            pos_step = (l_max + step + deltas).view(1, batch, 1).expand(3, batch, 1)
+            out = self.bb.forward_cached(step_emb, attn, pos_step, past_key_values=past)
+            past = out.past_key_values
+            next_logits = self.bb.lm_head(out.last_hidden_state[:, -1])
+        texts = []
+        for row_ids in collected:
+            if eos in row_ids:
+                row_ids = row_ids[: row_ids.index(eos)]
+            texts.append(self.bb.tokenizer.decode(row_ids, skip_special_tokens=True).strip())
+        return texts
 
     def build_eval(
         self,

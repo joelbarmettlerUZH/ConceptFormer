@@ -705,6 +705,9 @@ def cf_train(
         str,
         typer.Option(help="concept slot: prefix|before_entity|after_entity|replace_entity"),
     ] = "prefix",
+    injection_port: Annotated[
+        str, typer.Option(help="concept interface: text | vision (multimodal backbones only)")
+    ] = "text",
     grad_clip: Annotated[float, typer.Option(help="max grad-norm (0=off)")] = 0.0,
     grad_accum: Annotated[
         int, typer.Option(help="micro-batches/step (effective batch = batch*grad_accum)")
@@ -780,6 +783,7 @@ def cf_train(
         subsample_neighbors=subsample,
         cache_teacher=cache_teacher,
         placement=placement,
+        injection_port=injection_port,
         grad_clip=grad_clip,
         grad_accum=grad_accum,
         ema_decay=ema_decay,
@@ -805,7 +809,8 @@ def cf_train(
                 "split_mode": split_mode,
                 "eval_n": eval_n, "augment": augment, "subsample": subsample,
                 "cache_teacher": cache_teacher,
-                "placement": placement, "grad_clip": grad_clip, "grad_accum": grad_accum,
+                "placement": placement, "injection_port": injection_port,
+                "grad_clip": grad_clip, "grad_accum": grad_accum,
                 "effective_batch": batch * grad_accum,
                 "ema_decay": ema_decay,
                 "gate_mode": gate_mode, "seed": seed, "model": model,
@@ -922,9 +927,11 @@ def cf_train(
     best_path = settings.data_root / "checkpoints" / f"{checkpoint}_best.pt" if checkpoint else None
     # Stored in checkpoints so eval-final can reconstruct this run's exact train/val split
     # (legacy checkpoints without it are assumed question-mode split with the training seed).
+    # "model" guards against evaluating with the wrong backbone: different backbones can share
+    # d_llm (Qwen3-0.6B and Qwen3.5-0.8B are both 1024), so a mismatch loads silently.
     split_meta = {
         "split_mode": split_mode, "split_seed": seed, "val_frac": val_frac,
-        "dataset": dataset, "snapshot": snapshot,
+        "dataset": dataset, "snapshot": snapshot, "model": model,
     }
     for s in range(1, steps + 1):
         sample = rng.sample(train_pool, min(eff_batch, len(train_pool)))
@@ -1065,6 +1072,12 @@ def _load_trained_checkpoint(
         ckpt_path = Path(art.download()) / f"{checkpoint}.pt"
     blob = torch.load(ckpt_path, map_location=device, weights_only=False)
     cfg = TrainConfig(**blob["config"])
+    trained_model = (blob.get("meta") or {}).get("model")
+    if trained_model and trained_model != model:
+        # Different backbones can share d_llm, so the state dict would load silently — refuse.
+        raise typer.BadParameter(
+            f"checkpoint was trained on {trained_model!r} but --model is {model!r}"
+        )
     cache = KVCache(settings.generation_cache_path) if use_generation_cache else None
     chat = ChatModel(model, device=device, cache=cache)
     trainer = ConceptTrainer(Backbone(chat), cfg)

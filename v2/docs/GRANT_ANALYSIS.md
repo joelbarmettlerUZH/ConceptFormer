@@ -213,13 +213,19 @@ GraphToken (2309.15427 / 2402.05862, per-question GNN encoders, task-CE, no prec
 meta-work (GTEval 2605.03514; "When Graph Tokens Sink" 2606.03712) explicitly identifies the
 faithfulness deficiency our counterfactual protocol measures.
 
-**The proposed niche: scaling laws of knowledge injection into frozen LLMs.** A 2D measurement
-surface — training entities (10k -> 100k -> 300k -> 1M) x frozen backbone size (Qwen3 0.6B ->
-32B) — with unseen-entity generalization and causal faithfulness as response variables. Both
-marginals are empty niches (no injection-vs-LLM-scale study within one family exists; no
-data-scaling law for knowledge encoders exists), our existing results are the surface's first
-measured points, and it connects to the knowledge-capacity-laws (2404.05405) and
-encode-vs-recall (2602.14080) conversations. Secondary bounded aim: injecting concept tokens
-through a VLM's continuous-token (image) interface (unoccupied; honest framing in
-RELATED_WORK.md Sec 5). The compute ask maps 1:1 onto this surface: bigger teachers x more
-entities, embarrassingly parallel — exactly what 2x 24 GB consumer GPUs cannot provide.
+**The proposed niche: scaling laws of knowledge injection into frozen LLMs.** A measurement
+surface over the **Qwen3.5 family** (huggingface.co/collections/Qwen/qwen35) — training entities
+(10k -> 100k -> 300k -> 1M) x frozen backbone (dense 0.8B/2B/4B/9B/27B, ~34x span) — with
+unseen-entity generalization and causal faithfulness as response variables. Both marginals are
+empty niches (no injection-vs-LLM-scale study within one family exists; no data-scaling law for
+knowledge encoders exists), our existing results are the surface's first measured points, and it
+connects to the knowledge-capacity-laws (2404.05405) and encode-vs-recall (2602.14080)
+conversations. The family adds two design upgrades: (i) **every Qwen3.5 size is natively
+multimodal**, so the image-pathway question (inject concept tokens through the vision-token port
+vs the text-embedding port) becomes a *factor inside the surface* at 3 sizes, not a separate
+model line; (ii) the **MoE members (35B-A3B, 122B-A10B; stretch 397B-A17B)** let us test whether
+injection quality tracks TOTAL or ACTIVE parameters — unstudied anywhere. The compute ask maps
+1:1 onto this surface: bigger teachers x more entities, embarrassingly parallel across ~100
+single-node runs — and the 27B+/MoE rows are memory-infeasible on 2x 24 GB consumer GPUs, not
+merely slow (the 397B-A17B stretch run requires a full GH200 node for the frozen weights alone).
+Month-1 task: re-anchor the locked 0.6B recipe on Qwen3.5-0.8B before the sweep.

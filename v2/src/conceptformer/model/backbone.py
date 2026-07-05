@@ -17,7 +17,7 @@ a pure function so it unit-tests without a model.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import Tensor
@@ -52,6 +52,12 @@ class Backbone:
         self._embedding = self.model.get_input_embeddings()
         self.d_model: int = int(self._embedding.embedding_dim)
         self.dtype = self._embedding.weight.dtype
+        # Multimodal wrappers (Qwen3.5 ConditionalGeneration) nest the text stack one level
+        # deeper (model.model.language_model); text-only forwards must target it directly so
+        # ``forward_hidden`` skips the vision tower.
+        base = self.model.model
+        self._lm = getattr(base, "language_model", base)
+        self.is_multimodal = self._lm is not base
 
     @torch.no_grad()
     def embed_labels(self, texts: Sequence[str]) -> Tensor:
@@ -83,13 +89,63 @@ class Backbone:
 
         Avoids materializing the ``(B, T, V)`` logits (V≈152k): the caller gathers the few path
         positions first, then applies ``lm_head`` only there. Identical results, far less memory.
+
+        Multimodal stacks use M-RoPE and expect ``(3, B, L)`` position ids. For text-only
+        splices our ids are the trivial contiguous ones the stack derives by default, so we
+        pass ``None``; explicit 3-D ids (the vision-port path, computed via
+        ``mrope_position_ids``) are passed through unchanged.
         """
-        out = self.model.model(
+        if self.is_multimodal:
+            position_ids = position_ids if position_ids is not None and position_ids.dim() == 3 \
+                else None
+        out = self._lm(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             position_ids=position_ids,
         )
         return out.last_hidden_state
+
+    def mrope_position_ids(
+        self,
+        input_ids: Tensor,
+        mm_token_type_ids: Tensor,
+        image_grid_thw: Tensor,
+        attention_mask: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        """``(3, B, L)`` M-RoPE ids + per-row continuation deltas, via the model's own indexer.
+
+        The wrapper derives image-grid positions from token IDS, which ``inputs_embeds`` alone
+        cannot convey — so the vision-port trainer computes them here explicitly and generation
+        continues text positions at ``seq_len + step + delta`` per row.
+        """
+        if not self.is_multimodal:
+            raise RuntimeError("mrope_position_ids requires a multimodal backbone")
+        return self.model.model.get_rope_index(
+            input_ids,
+            mm_token_type_ids,
+            image_grid_thw=image_grid_thw,
+            attention_mask=attention_mask,
+        )
+
+    def forward_cached(
+        self,
+        inputs_embeds: Tensor,
+        attention_mask: Tensor,
+        position_ids: Tensor | None,
+        past_key_values: object = None,
+    ) -> Any:  # HF ModelOutput (untyped library boundary, like from_pretrained)
+        """One KV-cached forward on the text stack — the vision-port incremental decode step.
+
+        The wrapper's ``generate`` cannot be used there (it derives M-RoPE from token ids,
+        which spliced ``inputs_embeds`` do not carry), so the trainer drives decoding manually.
+        """
+        return self._lm(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            use_cache=True,
+        )
 
     def lm_head(self, hidden: Tensor) -> Tensor:
         """Project hidden states to vocab logits (position-wise; apply after gathering paths)."""

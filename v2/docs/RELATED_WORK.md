@@ -137,9 +137,11 @@ model-size-dependent memory-collapse point — ammunition for the context-side/f
 ## 5. Niche decision (for the grant)
 
 **Lead niche: "Scaling laws of knowledge injection into frozen LLMs."** A 2D measurement surface —
-(training entities: 10k -> 100k -> 300k -> 1M) x (frozen backbone: Qwen3 0.6B -> 1.7B -> 4B -> 8B
--> 14B/32B) — with unseen-entity generalization (PopQA/EntityQuestions) and causal faithfulness as
-the response variables. Why this wins:
+(training entities: 10k -> 100k -> 300k -> 1M) x (frozen backbone: the **Qwen3.5 family** — dense
+0.8B/2B/4B/9B/27B, MoE 35B-A3B/122B-A10B, stretch 397B-A17B; all natively multimodal, so the
+image-pathway ablation runs inside the same family) — with unseen-entity generalization
+(PopQA/EntityQuestions) and causal faithfulness as the response variables. NOTE: all existing v2
+evidence is on Qwen3-0.6B; the sweep re-anchors on Qwen3.5-0.8B first. Why this wins:
 - Both marginals are EMPTY niches (sections 3-4): no injection-quality-vs-LLM-scale study within
   one family exists, and no data-scaling law for knowledge encoders exists.
 - v2's existing results are the first measured points (10k->100k PopQA jump with held-in

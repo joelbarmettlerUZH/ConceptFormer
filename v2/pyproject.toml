@@ -38,6 +38,8 @@ infer = [
     "transformers>=4.51",
     "accelerate>=0.30",
     "wandb>=0.18",
+    "flash-linear-attention>=0.5.1",
+    "causal-conv1d>=1.6.2.post1",
 ]
 # Plotting for paper/grant figures. Kept out of infer so GPU installs stay lean.
 viz = [

@@ -61,15 +61,27 @@ class ChatModel:
         cache: KVCache | None = None,
     ) -> None:
         import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer
+        from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
         auto_tokenizer: Any = AutoTokenizer
-        auto_model: Any = AutoModelForCausalLM
         self.model_id = model_id
         self.enable_thinking = enable_thinking
         self._cache = cache
         self.tokenizer = auto_tokenizer.from_pretrained(model_id)
-        self.model = auto_model.from_pretrained(model_id, dtype=getattr(torch, dtype)).to(device)
+        # Natively-multimodal families (e.g. Qwen3.5: every size is image-text-to-text) ship a
+        # conditional-generation wrapper, not a CausalLM. Text-only usage is identical once
+        # loaded via the right auto-class; the Backbone adapter handles the nested text stack.
+        config = AutoConfig.from_pretrained(model_id)
+        self.is_multimodal = getattr(config, "text_config", None) is not None
+        auto_model: Any
+        if self.is_multimodal:
+            from transformers import AutoModelForImageTextToText
+
+            auto_model = AutoModelForImageTextToText
+        else:
+            auto_model = AutoModelForCausalLM
+        loaded: Any = auto_model.from_pretrained(model_id, dtype=getattr(torch, dtype))
+        self.model = loaded.to(device)
         self.model.eval()
         self._device = device
         # Left-padding is required for correct batched decoder-only generation.

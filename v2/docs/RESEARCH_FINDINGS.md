@@ -903,6 +903,76 @@ KL 0.06-0.08 nats, flat across k (not blowing up at k32).
 
 ---
 
+## Finding 16 — Qwen3.5-0.8B pilot: recipe transfers across families; vision-port injection
+## reaches parity at k8, trails at k16
+
+> ✅ **EVIDENCE-BACKED (2026-07-03, M7 protocol: full PopQA n=14,266, strict held-out, paired
+> McNemar; 2 seeds/cell).** Pilot for the grant's family migration + injection-port aim (O4),
+> on `cftrain_qa_10k_q35b08` (10k corpus re-tiered + teacher-pathed by Qwen3.5-0.8B; 84,843
+> rows — fewer than 0.6B's 92,177 because the stronger base answers more parametrically).
+
+**1. Family migration de-risked (text port, zero HP retuning).** q35b08 k8: held-out
+0.427/0.426, PopQA 0.226/0.208; k16: held-out 0.519/0.493, PopQA 0.254/0.294. Brackets: base
+0.124, RAG 0.943 (0.6B: base 0.103, RAG 0.960). The locked recipe (gate-none, eff-batch-32,
+lr 1e-4, d1024/L4) trains, converges, and generalizes on a different model family and a hybrid
+linear-attention architecture. Note the **narrowed concept-over-base margin** vs 0.6B (PopQA
++10.3 pt over base vs +12.9) — the first measured point suggesting injection value is NOT
+monotone in backbone capability; motivates the model-scale law (grant O1).
+
+**2. Vision-port injection works, but is not better at 0.8B.** Same encoder, concepts spliced
+as a pseudo-image (`[vision_start][k x image_token][vision_end]`, M-RoPE 1xk grid via the
+model's own get_rope_index; `model/vision_port.py`, `injection_port=vision`). Paired per-item
+comparison vs the text port (`scripts/pilot_port_comparison.py`):
+
+| set | k | seed | text | vision | delta | p |
+|---|--:|--:|--:|--:|--:|--:|
+| held_out | 8 | 0/1 | 0.427 / 0.426 | 0.434 / 0.432 | +0.7 / +0.7 | n.s. / n.s. |
+| held_out | 16 | 0/1 | 0.519 / 0.493 | 0.491 / 0.423 | -2.8 / -7.0 | 4e-3 / 1e-13 |
+| popqa | 8 | 0/1 | 0.225 / 0.208 | 0.216 / 0.232 | -0.9 / +2.4 | 8e-5 / 6e-22 |
+| popqa | 16 | 0/1 | 0.255 / 0.296 | 0.261 / 0.207 | +0.6 / -8.8 | 2e-2 / e-191 |
+
+**Read.** At k8 the ports are at parity (deltas within +-2.4 pt, mixed sign across seeds). At
+k16 the vision port trails and one seed (s1) is clearly unstable (-7.0/-8.8). The "vision
+interface is a better landing pad" hypothesis is NOT supported at 0.8B — but the ports learn
+*different* solutions (300-1,800 discordant items per cell), the vision port received zero
+port-specific tuning, and 0.8B has the family's weakest vision pretraining. Whether the port
+effect flips with backbone scale is exactly grant aim O4; the pilot converts it from
+speculation to a measured, non-trivial question.
+
+**Caveats.** 2 seeds/cell; single backbone size; no port-specific HP tuning; 10k corpus
+(25-epoch regime). **Re-verify:** eval-final summaries under
+`data/analysis/eval_final/q35b08_*`; W&B groups `pilot-qwen35-08b`, `pilot-qwen35-08b-vision`.
+
+**3. ADDENDUM (2026-07-04) — 2B transect: the injection margin ANTI-SCALES with backbone size
+at fixed data.** Qwen3.5-2B, same corpus protocol (`cftrain_qa_10k_q35b2`, 2B teacher), same
+recipe (batch 8 x accum 4 = eff 32), k{8,16} x 2 seeds + vision k8 x 2 seeds, all eval-final'd
+(full PopQA). PopQA concept-over-base margin at fixed 10k training entities:
+
+| backbone | base | k8 margin | k16 margin |
+|---|--:|--:|--:|
+| Qwen3-0.6B (anchor, 3 seeds) | 0.103 | +12.9 pt | - |
+| Qwen3.5-0.8B (2 seeds) | 0.124 | +9.4 pt | +15.1 pt |
+| Qwen3.5-2B (2 seeds) | 0.150 | +5.1 pt | +6.5 pt |
+
+Within-family 0.8B -> 2B the margin roughly HALVES at both k, while strict held-out stays
+healthy (2B: 0.465-0.503) — the encoder works; its *unseen-entity* value shrinks as the frozen
+model grows, at fixed data. Combined with the data axis (+12.9 -> +37.4 pt going 10k -> 100k
+entities at 0.6B, F12 corrected), the pilot surface shows its first structure: **data scales
+injection up, model size at fixed data scales it down; the interaction is the open question**
+(figure: `data/analysis/pilot_scaling_surface.png`, `scripts/pilot_scaling_figure.py`).
+Port x scale: at 2B k8 the vision port stays at parity on PopQA (-0.3/+2.7 pt, mixed seeds,
+like 0.8B) and mixed on held-out (-2.5/+1.5); no flip either direction by 2B — k16 vision (the
+0.8B deficit) not re-tested at 2B. Faithfulness sweeps on the 0.8B pilots: swap-follow k8
+7.5%/5.2% (text/vision), k16 11.4%/12.9% — far below the 0.6B-at-100k values (25.8% k8), but
+CORPUS-CONFOUNDED (10k 25-epoch vs 100k 4-epoch); logged as another non-triviality signal, not
+a family verdict. Open interpretation for the grant: shrinking margin = ceiling effect
+(stronger base) vs steerability (bigger frozen models need more data/tokens to steer) — the
+100k-corpus corners of the funded plan disentangle these. Caveats: 2 seeds/cell, 10k corpus,
+no per-size HP retuning (lr 1e-4 everywhere). Re-verify: `data/analysis/eval_final/q35b2_*`;
+W&B groups `pilot-qwen35-2b`, `pilot-qwen35-2b-vision`; `scripts/pilot_port_comparison.py`.
+
+---
+
 ## Open questions (not yet evidence-backed — do NOT state as findings)
 
 0. ~~Establish the noise floor + re-test downgraded findings multi-seed (F8).~~ **RESOLVED → F8 +
