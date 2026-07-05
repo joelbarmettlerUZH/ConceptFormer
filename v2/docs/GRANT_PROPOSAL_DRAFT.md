@@ -36,10 +36,15 @@ differentiation: repo `docs/RELATED_WORK.md`). Meanwhile 2026 meta-analyses (GTE
 "When Graph Tokens Sink" 2606.03712) show current graph-token systems are not faithful carriers
 of structure — and call for exactly the causal evaluation methodology we contribute.
 
-**Preliminary results (our own, public repo + W&B).** ConceptFormer (v1: arXiv 2504.07624; v2:
-this project) encodes a Wikidata entity's 1-hop neighborhood into k soft tokens via a small
-Perceiver-style resampler, spliced into a frozen Qwen3-0.6B and trained *label-free* by
-full-vocab KL self-distillation against the same LLM reading the facts as text. On two consumer
+**Preliminary results (our own, peer-reviewed + public repo + W&B).** ConceptFormer v1
+(Barmettler, Bernstein & Rossetto) was published at **The Web Conference 2026** companion
+proceedings (WWW Companion '26, pp. 587-596, DOI 10.1145/3774905.3794653) and received the
+**best paper award of its hosting workshop**, establishing on GPT-2 that latent concept
+injection beats graph textification by up to +272% Hit@10 at 130x fewer tokens. v2 (this
+project) rebuilds the approach on modern backbones: it encodes a Wikidata entity's 1-hop
+neighborhood into k soft tokens via a small Perceiver-style resampler, spliced into a frozen
+Qwen3-0.6B and trained *label-free* by full-vocab KL self-distillation against the same LLM
+reading the facts as text. On two consumer
 RTX 4090s we have established, under a hardened protocol (full 14,266-question PopQA, strict
 leakage-free held-out, Wilson CIs, paired McNemar, 3 seeds):
 (i) **token efficiency** — k=8 soft tokens reach 0.477 on unseen-entity PopQA (frozen base:
@@ -185,6 +190,11 @@ plan at 20k hours:** drop the stretch tier and the 1M x 27B corner (-7,800) — 
 
 ### A.3 Feasibility evidence
 
+**Track record:** the predecessor system was peer-reviewed and published at WWW Companion '26
+(Barmettler, Bernstein & Rossetto, DOI 10.1145/3774905.3794653) and won the **best paper award**
+of its hosting workshop — the proposed program extends a line of work this team has already
+carried through review once.
+
 Public repo (github.com/joelbarmettlerUZH/ConceptFormer, branch conceptformer-v2): full
 pipeline (corpus generation via vLLM, teacher extraction, training, evaluation) is resumable,
 cached, and CI-gated (ruff/ty/pytest, 234 tests); all cited numbers trace to W&B run-ids
@@ -195,7 +205,10 @@ hardware before submission, de-risking O4 and the family migration.
 
 ## APPENDIX B — References
 
-arXiv: 2504.07624 (ConceptFormer v1); 2405.13792 (xRAG); 2410.10450 (KBLaM); 2210.04726
+ConceptFormer v1: Barmettler, Bernstein & Rossetto, "ConceptFormer: Towards Graph-Native
+Grounding of Large Language Models via Latent Concept Injection", WWW Companion '26,
+pp. 587-596, DOI 10.1145/3774905.3794653 (**best paper award**, hosting workshop; arXiv
+2504.07624). Other works — arXiv: 2405.13792 (xRAG); 2410.10450 (KBLaM); 2210.04726
 (Knowledge Prompts); 2309.15427 (GNP); 2402.05862 (GraphToken); 2402.07630 (G-Retriever);
 2501.16075 (PISCO); 2506.06266 (Cartridges); 2307.06945 (ICAE); 2304.08467 (gist);
 2104.08691 (Power of Scale); 2404.05405 (knowledge capacity); 2602.14080 (encode-vs-recall);

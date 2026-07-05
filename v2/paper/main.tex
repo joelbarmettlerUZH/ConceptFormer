@@ -80,9 +80,10 @@ spliced into the input embeddings of a \emph{frozen} LLM. The encoder is amortiz
 an unseen entity requires one forward pass, no per-entity training. Training requires no labeled
 QA data; the student (frozen LLM reading $k$ concept tokens) is distilled against the teacher (the
 \emph{same} frozen LLM reading the facts as text) by full-vocabulary KL along the teacher's greedy
-answer path. A first version of this idea \citep{cfv1} was validated on GPT-2 with rank-based
-metrics; this project rebuilds it on modern backbones (Qwen3-0.6B; Qwen3.5-0.8B/2B) with a
-generative exact-match protocol, and asks the questions v1 could not: does the encoder
+answer path. A first version of this idea was validated on GPT-2 with rank-based metrics and published at
+The Web Conference 2026 companion track, where it received its hosting workshop's best paper
+award \citep{cfv1}; this project rebuilds it on modern backbones (Qwen3-0.6B; Qwen3.5-0.8B/2B)
+with a generative exact-match protocol, and asks the questions v1 could not: does the encoder
 \emph{generalize} to unseen entities, does the model actually \emph{read} the injected graph, and
 how does all of this \emph{scale}?
 
@@ -455,9 +456,12 @@ that is what \S\ref{sec:open} is for.
 \small
 \begin{thebibliography}{40}
 
-\bibitem{cfv1} J.~Barmettler.
-\newblock ConceptFormer: Towards efficient use of knowledge-graph embeddings in large language models.
-\newblock arXiv:2504.07624, 2025.
+\bibitem{cfv1} J.~Barmettler, A.~Bernstein, and L.~Rossetto.
+\newblock ConceptFormer: Towards graph-native grounding of large language models via latent
+  concept injection.
+\newblock In \emph{Companion Proceedings of the ACM Web Conference 2026 (WWW Companion '26)},
+  pp.~587--596, 2026. Best paper award, hosting workshop.
+  \url{https://doi.org/10.1145/3774905.3794653}. arXiv:2504.07624.
 
 \bibitem{xrag} X.~Cheng, X.~Wang, X.~Zhang, T.~Ge, S.~Chen, F.~Wei, H.~Zhang, and D.~Zhao.
 \newblock xRAG: Extreme context compression for retrieval-augmented generation with one token.

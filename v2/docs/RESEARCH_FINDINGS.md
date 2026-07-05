@@ -813,6 +813,11 @@ with k); swap-follow rises monotonically 0.8%→34.2% while stick falls 39%→14
 > **reproduces v1's core phenomena** on a *stronger backbone, a stricter metric, and a harder task*,
 > and *adds* two things v1 lacked — an unseen-entity generalization axis (PopQA) and a graph-faithfulness
 > proof. Source: `hf papers read 2504.07624` (v1, Barmettler 2025).
+> **Publication status (added 2026-07-05):** v1 is peer-reviewed — Barmettler, Bernstein &
+> Rossetto, "ConceptFormer: Towards Graph-Native Grounding of Large Language Models via Latent
+> Concept Injection", **WWW Companion '26**, pp. 587-596, DOI 10.1145/3774905.3794653, and won
+> the **best paper award** of its hosting workshop. Cite the proceedings version, not the
+> preprint, everywhere (paper, grant, related work — all updated).
 
 **The setups are NOT comparable number-for-number — be honest about this in the paper:**
 
