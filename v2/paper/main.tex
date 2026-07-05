@@ -109,6 +109,25 @@ itself a reusable contribution.
 \section{Related work}
 \label{sec:related}
 
+\paragraph{Lineage (from v1).} The problem framing descends from the observation that language
+models act as (unreliable) knowledge bases \citep{lama,roberts}, with the deficit concentrated
+on long-tail entities \citep{headtotail,emptyshelves}. The standard remedy is retrieval-augmented
+generation \citep{rag}, which pays for faithfulness in context tokens. An older family of
+\emph{knowledge-enhanced} PLMs injects KG information by modifying the model itself ---
+KnowBERT \citep{knowbert}, K-BERT \citep{kbert}, K-Adapter \citep{kadapter} --- which our
+frozen-model constraint deliberately rules out. On the representation side, ConceptFormer v1
+\citep{cfv1} injected \emph{pretrained} KG node embeddings (TransE-family vectors at
+PyTorch-BigGraph scale \citep{transe,pbg}) through a per-entity lookup table; v2 replaces this
+with features built from the frozen LLM's own label embeddings, which is what makes the encoder
+inductive (\S\ref{sec:method}) --- unseen entities need labels, not pretrained vectors. The
+mechanism of prepending \emph{learned continuous tokens} to a frozen model descends from
+prefix-tuning and soft prompts \citep{prefixtuning,lester,qineisner}, textual inversion's
+``an image is worth one word'' \citep{textualinversion}, and, most directly, Frozen
+\citep{frozenlm} and Flamingo \citep{flamingo}, which feed continuous non-text tokens into
+frozen LMs --- the precedent behind both our text and vision injection ports. Our substrate is
+Wikidata \citep{wikidata}; v1's evaluation data derives from T-REx \citep{trex}, and graph
+verbalization baselines follow the graph-to-text encoding line \citep{talklikeagraph}.
+
 \paragraph{Soft-token context compression.} A line of work compresses \emph{text} into few
 continuous tokens: gist tokens \citep{gist} and AutoCompressor \citep{autocompressor} adapt the
 LM itself; ICAE \citep{icae} and 500xCompressor \citep{fivehundredx} train LoRA encoders against
@@ -421,8 +440,9 @@ at sizes with strong vision pretraining? \emph{Mechanics built; larger sizes not
 \textbf{Q4 --- Faithfulness at scale.} Does swap-following keep rising with data and $k$, and
 can an auxiliary per-edge objective accelerate it? \emph{Design sketched, not yet run.}
 \textbf{Q5 --- Missing baselines.} An xRAG-style retriever-vector bridge trained under our exact
-protocol, per-entity prefix-tuning (the transductive upper baseline), and on-policy distillation
-(GKD \citep{gkd}) as an objective ablation. \emph{Not yet run.}
+protocol, per-entity prefix-tuning \citep{prefixtuning} (the transductive upper baseline, and the
+closest modern analogue to v1's lookup table), and on-policy distillation (GKD \citep{gkd}) as an
+objective ablation. \emph{Not yet run.}
 \textbf{Q6 --- Beyond 1-hop.} 2-hop neighborhoods raise the facts-per-token ratio $\sim$10--100$\times$
 at fixed $k$; we treat this as a rate--distortion ablation inside Q1, not a standalone
 contribution (the per-question subgraph-encoding literature is crowded \citep{gnp,gretriever}).
@@ -582,6 +602,80 @@ that is what \S\ref{sec:open} is for.
 \bibitem{qwen} Qwen Team.
 \newblock Qwen3 and Qwen3.5 model families.
 \newblock Technical reports, 2025--2026; \url{https://huggingface.co/Qwen}.
+
+\bibitem{rag} P.~Lewis, E.~Perez, A.~Piktus, F.~Petroni, V.~Karpukhin, N.~Goyal,
+  H.~K\"{u}ttler, M.~Lewis, W.-t.~Yih, T.~Rockt\"{a}schel, S.~Riedel, and D.~Kiela.
+\newblock Retrieval-augmented generation for knowledge-intensive NLP tasks.
+\newblock NeurIPS 2020.
+
+\bibitem{lama} F.~Petroni, T.~Rockt\"{a}schel, S.~Riedel, P.~Lewis, A.~Bakhtin, Y.~Wu, and
+  A.~Miller.
+\newblock Language models as knowledge bases?
+\newblock EMNLP 2019.
+
+\bibitem{roberts} A.~Roberts, C.~Raffel, and N.~Shazeer.
+\newblock How much knowledge can you pack into the parameters of a language model?
+\newblock EMNLP 2020.
+
+\bibitem{headtotail} K.~Sun, Y.~E.~Xu, H.~Zha, Y.~Liu, and X.~L.~Dong.
+\newblock Head-to-tail: How knowledgeable are large language models? A.k.a.\ will LLMs replace
+  knowledge graphs?
+\newblock arXiv:2308.10168, 2023.
+
+\bibitem{knowbert} M.~E.~Peters, M.~Neumann, R.~L.~Logan~IV, R.~Schwartz, V.~Joshi, S.~Singh,
+  and N.~A.~Smith.
+\newblock Knowledge enhanced contextual word representations.
+\newblock EMNLP 2019.
+
+\bibitem{kbert} W.~Liu, P.~Zhou, Z.~Zhao, Z.~Wang, Q.~Ju, H.~Deng, and P.~Wang.
+\newblock K-BERT: Enabling language representation with knowledge graph.
+\newblock AAAI 2020.
+
+\bibitem{kadapter} R.~Wang, D.~Tang, N.~Duan, Z.~Wei, X.~Huang, J.~Ji, G.~Cao, D.~Jiang, and
+  M.~Zhou.
+\newblock K-Adapter: Infusing knowledge into pre-trained models with adapters.
+\newblock Findings of ACL 2021.
+
+\bibitem{transe} A.~Bordes, N.~Usunier, A.~Garc\'{i}a-Dur\'{a}n, J.~Weston, and O.~Yakhnenko.
+\newblock Translating embeddings for modeling multi-relational data.
+\newblock NeurIPS 2013.
+
+\bibitem{pbg} A.~Lerer, L.~Wu, J.~Shen, T.~Lacroix, L.~Wehrstedt, A.~Bose, and
+  A.~Peysakhovich.
+\newblock PyTorch-BigGraph: A large scale graph embedding system.
+\newblock MLSys 2019.
+
+\bibitem{prefixtuning} X.~L.~Li and P.~Liang.
+\newblock Prefix-tuning: Optimizing continuous prompts for generation.
+\newblock ACL 2021.
+
+\bibitem{qineisner} G.~Qin and J.~Eisner.
+\newblock Learning how to ask: Querying LMs with mixtures of soft prompts.
+\newblock NAACL 2021.
+
+\bibitem{textualinversion} R.~Gal, Y.~Alaluf, Y.~Atzmon, O.~Patashnik, A.~H.~Bermano,
+  G.~Chechik, and D.~Cohen-Or.
+\newblock An image is worth one word: Personalizing text-to-image generation using textual
+  inversion.
+\newblock ICLR 2023.
+
+\bibitem{frozenlm} M.~Tsimpoukelli, J.~Menick, S.~Cabi, S.~M.~A.~Eslami, O.~Vinyals, and
+  F.~Hill.
+\newblock Multimodal few-shot learning with frozen language models.
+\newblock NeurIPS 2021.
+
+\bibitem{wikidata} D.~Vrande\v{c}i\'{c} and M.~Kr\"{o}tzsch.
+\newblock Wikidata: A free collaborative knowledgebase.
+\newblock Communications of the ACM, 57(10):78--85, 2014.
+
+\bibitem{trex} H.~ElSahar, P.~Vougiouklis, A.~Remaci, C.~Gravier, J.~Hare, F.~Laforest, and
+  E.~Simperl.
+\newblock T-REx: A large scale alignment of natural language with knowledge base triples.
+\newblock LREC 2018.
+
+\bibitem{talklikeagraph} B.~Fatemi, J.~Halcrow, and B.~Perozzi.
+\newblock Talk like a graph: Encoding graphs for large language models.
+\newblock ICLR 2024; arXiv:2310.04560.
 
 \end{thebibliography}
 
