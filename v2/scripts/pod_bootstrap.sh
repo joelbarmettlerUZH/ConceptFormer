@@ -34,9 +34,21 @@ echo "=== [3/5] auth"
 uv run hf auth login --token "$HF_TOKEN" >/dev/null 2>&1 || hf auth login --token "$HF_TOKEN"
 
 echo "=== [4/5] data (snapshots + prepped corpora from the HF dataset repo)"
-# data/ is git-ignored and machine-local by design; the HF repo mirrors exactly the layout
-# the pipeline expects under v2/data/.
+# data/ is git-ignored and machine-local by design. The HF repo uses explicit teacher names
+# (reader-facing); the pipeline's internal directory names are shorter -- map them here.
 uv run hf download joelbarmettler/conceptformer-data --repo-type dataset --local-dir data
+declare -A NAME_MAP=(
+  ["cftrain_qa_10k_qwen3-0.6b"]="cftrain_qa_10k"
+  ["cftrain_qa_100k_qwen3-0.6b"]="cftrain_qa_100k"
+  ["cftrain_qa_10k_qwen3-1.7b"]="cftrain_qa_10k_q3b17"
+  ["cftrain_qa_100k_qwen3-1.7b"]="cftrain_qa_100k_q3b17"
+  ["cftrain_qa_10k_qwen3.5-0.8b"]="cftrain_qa_10k_q35b08"
+  ["cftrain_qa_10k_qwen3.5-2b"]="cftrain_qa_10k_q35b2"
+)
+for hf_name in "${!NAME_MAP[@]}"; do
+  src="data/cf_train/$hf_name"; dst="data/cf_train/${NAME_MAP[$hf_name]}"
+  [ -d "$src" ] && [ ! -d "$dst" ] && mv "$src" "$dst"
+done
 
 echo "=== [5/5] smoke"
 uv run python -c "
