@@ -829,8 +829,11 @@ class ConceptTrainer:
 
     @torch.no_grad()
     def _eval_kl(self, prepared: list[Prepared]) -> float:
+        # Chunk of 8, not the training batch: in the live-teacher regime this path runs a FULL
+        # teacher forward over long facts-sequences plus two (B, m, V) float32 logit tensors —
+        # at backbones >=1.7B a chunk of 32 OOMs a 24 GB card at the very first eval.
         total, n = 0.0, 0
-        for chunk in _chunks(prepared, 32):
+        for chunk in _chunks(prepared, 8):
             total += float(self.batch_loss_cached(chunk)) * len(chunk)
             n += len(chunk)
         return total / max(1, n)
