@@ -1,0 +1,162 @@
+"""ConceptFormer-2 paper figures (Figs 3-5): matched k-curves, data x model grid, causal probes.
+
+All accuracy data is read live from data/analysis/eval_final/ (the M7 ground truth), so the
+figures regenerate as grid cells land (missing cells are skipped). The probe panel values are
+transcribed from the faithfulness/capability sweep logs (provenance: W&B group
+phaseC-kfamily-100k checkpoints; seeds s1 = docs/RESEARCH_FINDINGS.md F13/F15 tables, seeds
+s0/s2 = the 2026-07-06 sweep logs) -- re-run cf-graph-faithfulness / cf-capability-preservation
+to re-verify.
+
+Run: uv run --group viz python scripts/cf2_figures.py
+"""
+
+from __future__ import annotations
+
+import json
+import statistics
+from pathlib import Path
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+ROOT = Path(__file__).resolve().parent.parent
+EF = ROOT / "data/analysis/eval_final"
+OUT = ROOT / "paper/figures"
+KS = [1, 2, 4, 8, 16, 32]
+BLUE, ORANGE, GREEN, DARK = "#2f6fb0", "#b0592f", "#3e8f5a", "#333333"
+
+
+def acc(names: list[str], eval_set: str, field: str = "concept") -> tuple | None:
+    vals = []
+    for n in names:
+        p = EF / n / "summary.json"
+        if p.exists():
+            vals.append(json.loads(p.read_text())[eval_set][field]["acc"])
+    if not vals:
+        return None
+    return statistics.mean(vals), (statistics.stdev(vals) if len(vals) > 1 else 0.0), len(vals)
+
+
+def curve_names(corpus: str, k: int) -> list[str]:
+    if corpus == "10k":
+        if k == 8:
+            return [f"p25_eff32_s{s}" for s in range(3)]
+        if k == 32:
+            return [f"v15_k32_s{s}_best" for s in range(3)]
+        return [f"p32_k{k}_s{s}" for s in range(3)]
+    return [f"pc_k{k}_best" if s == 0 else f"pc_k{k}_s{s}_best" for s in range(3)]
+
+
+# ---------------------------------------------------------------- Fig 3: matched k-curves
+fig, axes = plt.subplots(1, 2, figsize=(11, 4.4), sharex=True)
+for ax, es, title in [
+    (axes[0], "held_out", "Held-out questions (trained entities)"),
+    (axes[1], "popqa", "PopQA (unseen entities, full benchmark)"),
+]:
+    for corpus, color, marker in [("10k", ORANGE, "s"), ("100k", BLUE, "o")]:
+        xs, ys, errs = [], [], []
+        for k in KS:
+            a = acc(curve_names(corpus, k), es)
+            if a:
+                xs.append(k)
+                ys.append(a[0])
+                errs.append(a[1])
+        ax.errorbar(xs, ys, yerr=errs, fmt=f"{marker}-", color=color, capsize=3,
+                    label=f"{corpus} training entities")
+    ax.set_xscale("log", base=2)
+    ax.set_xticks(KS, [str(k) for k in KS])
+    ax.set_xlabel("concept tokens $k$")
+    ax.grid(True, alpha=0.25)
+    ax.legend(fontsize=9, loc="upper left")
+    ax.set_title(title, fontsize=10)
+# Annotate the shrinking data-scaling ratio on the PopQA panel (tokens substitute for data).
+for k in (8, 16, 32):
+    lo, hi = acc(curve_names("10k", k), "popqa"), acc(curve_names("100k", k), "popqa")
+    if lo and hi:
+        axes[1].annotate(f"$\\times${hi[0] / lo[0]:.2f}", xy=(k, (lo[0] + hi[0]) / 2),
+                         fontsize=8, color=DARK, ha="center")
+axes[0].set_ylabel("greedy exact-match accuracy")
+fig.tight_layout()
+fig.savefig(OUT / "fig_kcurves.png", dpi=150, bbox_inches="tight")
+print("wrote fig_kcurves.png")
+
+# ------------------------------------------------------- Fig 4: data x model grid (margins)
+GRID = {  # backbone -> corpus -> checkpoint names (k=8, before_entity)
+    "Qwen3-0.6B": {
+        "10k": [f"v15_be_k8_s{s}_best" for s in range(3)]
+        + [f"p34_before_entity_s{s}" for s in range(3)],
+        "100k": curve_names("100k", 8),
+    },
+    "Qwen3-1.7B": {
+        "10k": [f"q3b17_10k_k8_s{s}_best" for s in range(3)],
+        "100k": [f"q3b17_100k_k8_s{s}_best" for s in range(3)],
+    },
+    "Qwen3-4B": {
+        "10k": [f"q3b4_10k_k8_s{s}_best" for s in range(3)],
+        "100k": [f"q3b4_100k_k8_s{s}_best" for s in range(3)],
+    },
+}
+fig2, ax = plt.subplots(figsize=(6.2, 4.2))
+X = {"10k": 10_000, "100k": 100_000}
+for (backbone, cells), color, marker in zip(
+    GRID.items(), [BLUE, GREEN, ORANGE], "osD", strict=True
+):
+    xs, ys, errs = [], [], []
+    for corpus, names in cells.items():
+        c = acc(names, "popqa")
+        b = acc(names, "popqa", "base")
+        if c and b:
+            xs.append(X[corpus])
+            ys.append(100 * (c[0] - b[0]))
+            errs.append(100 * c[1])
+    if xs:
+        ax.errorbar(xs, ys, yerr=errs, fmt=f"{marker}-", color=color, capsize=3,
+                    label=backbone)
+ax.set_xscale("log")
+ax.set_xticks(list(X.values()), list(X.keys()))
+ax.set_xlabel("training entities")
+ax.set_ylabel("PopQA margin over own base (pt)")
+ax.set_title("Injected-knowledge margin: data axis per frozen backbone ($k$=8)", fontsize=10)
+ax.grid(True, alpha=0.25)
+ax.legend(fontsize=9)
+fig2.tight_layout()
+fig2.savefig(OUT / "fig_grid.png", dpi=150, bbox_inches="tight")
+print("wrote fig_grid.png")
+
+# ----------------------------------------------------------- Fig 5: causal probes vs k
+# Transcribed 3-seed probe results (see module docstring for provenance).
+SWAP = {  # k -> [s0, s1, s2] counterfactual swap-follow, ALL condition, %
+    1: [0.0, 0.8, 2.3], 2: [3.1, 5.3, 3.1], 4: [12.3, 16.5, 14.8],
+    8: [21.4, 25.8, 25.5], 16: [26.6, 29.8, 24.6], 32: [35.3, 34.2, 31.4],
+}
+CAP_KL = {  # k -> [s0, s1, s2] median next-token KL(base||concept) on control tasks, nats
+    1: [0.0695, 0.082, 0.0668], 2: [0.0705, 0.058, 0.0579], 4: [0.0503, 0.061, 0.0539],
+    8: [0.0697, 0.066, 0.0524], 16: [0.0516, 0.075, 0.0515], 32: [0.0755, 0.078, 0.0734],
+}
+fig3, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.0))
+means = [statistics.mean(SWAP[k]) for k in KS]
+errs = [statistics.stdev(SWAP[k]) for k in KS]
+ax1.errorbar(KS, means, yerr=errs, fmt="o-", color=BLUE, capsize=3)
+ax1.set_xscale("log", base=2)
+ax1.set_xticks(KS, [str(k) for k in KS])
+ax1.set_xlabel("concept tokens $k$")
+ax1.set_ylabel("counterfactual swap-follow (%)")
+ax1.set_title("Reads the graph: rewired edge $\\rightarrow$ rewired answer,\n"
+              "scaling with capacity (3 seeds)", fontsize=10)
+ax1.grid(True, alpha=0.25)
+means2 = [statistics.mean(CAP_KL[k]) for k in KS]
+errs2 = [statistics.stdev(CAP_KL[k]) for k in KS]
+ax2.errorbar(KS, means2, yerr=errs2, fmt="s-", color=GREEN, capsize=3)
+ax2.set_xscale("log", base=2)
+ax2.set_xticks(KS, [str(k) for k in KS])
+ax2.set_ylim(0, 0.5)
+ax2.set_xlabel("concept tokens $k$")
+ax2.set_ylabel("median KL(base $\\|$ concept), nats")
+ax2.set_title("Preserves the model: off-topic next-token\ndistribution barely moves (3 seeds)",
+              fontsize=10)
+ax2.grid(True, alpha=0.25)
+fig3.tight_layout()
+fig3.savefig(OUT / "fig_probes.png", dpi=150, bbox_inches="tight")
+print("wrote fig_probes.png")
