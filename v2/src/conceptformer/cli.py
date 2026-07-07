@@ -1559,6 +1559,7 @@ def cf_graph_faithfulness(
         pick_swap_target,
         swap_edge_neighbor,
     )
+    from conceptformer.eval.probes import faithfulness_summary
     from conceptformer.generate.dataset import load_cftrain_qa
     from conceptformer.generate.signal import answer_ok
     from conceptformer.train.trainer import TEACHER_SYSTEM
@@ -1588,7 +1589,6 @@ def cf_graph_faithfulness(
     base_items = [(sg_by_qid[r.subject_qid], r.question) for r in probes]
     base_out = gen(base_items)
     correct = [answer_ok(o, r.accepted_answers) for o, r in zip(base_out, probes, strict=True)]
-    n_base = sum(correct)
     # The frozen LLM with NO concepts: where it already knows the answer (memory), the swap test is
     # confounded. Splitting by base-known vs base-UNKNOWN isolates pure graph-reading.
     base_text = trainer._generate_text_batch([(TEACHER_SYSTEM, r.question) for r in probes], 32)
@@ -1620,37 +1620,72 @@ def cf_graph_faithfulness(
             abl_oth_meta.append(r)
 
     swap_out = gen(swap_items)
-    follow = sum(matches(o, m[2]) for o, m in zip(swap_out, swap_meta, strict=True))
-    stick = sum(matches(o, m[1]) for o, m in zip(swap_out, swap_meta, strict=True))
-    # Base-UNKNOWN subset: LLM can't answer from memory, so following the swap = pure graph-reading.
-    unk = [(o, m) for o, m in zip(swap_out, swap_meta, strict=True) if not m[3]]
-    unk_follow = sum(matches(o, m[2]) for o, m in unk)
-    unk_stick = sum(matches(o, m[1]) for o, m in unk)
+    follow = [matches(o, m[2]) for o, m in zip(swap_out, swap_meta, strict=True)]
+    stick = [matches(o, m[1]) for o, m in zip(swap_out, swap_meta, strict=True)]
+    swap_known = [m[3] for m in swap_meta]
     abl_ans_out = gen(abl_ans_items)
-    abl_ans_ok = sum(
+    abl_ans_ok = [
         answer_ok(o, r.accepted_answers) for o, r in zip(abl_ans_out, abl_ans_meta, strict=True)
-    )
+    ]
     abl_oth_out = gen(abl_oth_items)
-    abl_oth_ok = sum(
+    abl_oth_ok = [
         answer_ok(o, r.accepted_answers) for o, r in zip(abl_oth_out, abl_oth_meta, strict=True)
-    )
+    ]
 
-    pct = lambda a, b: f"{(a / b if b else 0):.1%}"  # noqa: E731
-    rprint(f"  baseline correct: {pct(n_base, len(probes))} ({n_base}/{len(probes)})  "
-           f"| base-only (no concepts) knows: {pct(sum(base_known), len(probes))}")
+    summary = faithfulness_summary(
+        correct, base_known, follow, stick, swap_known, abl_ans_ok, abl_oth_ok
+    )
+    report = {
+        "checkpoint": checkpoint, "probe": "graph_faithfulness", "dataset": dataset,
+        "snapshot": snapshot, "seed": seed, "config": blob["config"], **summary,
+    }
+    per_item: list[dict] = [
+        {"probe": "baseline", "subject": r.subject_qid, "question": r.question,
+         "correct": ok, "base_known": bk, "output": o}
+        for r, ok, bk, o in zip(probes, correct, base_known, base_out, strict=True)
+    ]
+    per_item += [
+        {"probe": "swap", "subject": m[0].subject_qid, "question": m[0].question,
+         "true_neighbor": m[1].label or m[1].qid, "swap_target": m[2].label or m[2].qid,
+         "base_known": m[3], "followed": f, "stuck": s, "output": o}
+        for m, f, s, o in zip(swap_meta, follow, stick, swap_out, strict=True)
+    ]
+    per_item += [
+        {"probe": "ablate_answer", "subject": r.subject_qid, "question": r.question,
+         "correct": ok, "output": o}
+        for r, ok, o in zip(abl_ans_meta, abl_ans_ok, abl_ans_out, strict=True)
+    ]
+    per_item += [
+        {"probe": "ablate_other", "subject": r.subject_qid, "question": r.question,
+         "correct": ok, "output": o}
+        for r, ok, o in zip(abl_oth_meta, abl_oth_ok, abl_oth_out, strict=True)
+    ]
+    out_dir = settings.data_root / "analysis" / "probes" / f"{checkpoint}__faithfulness"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with (out_dir / "items.jsonl").open("w", encoding="utf-8") as fh:
+        for row in per_item:
+            fh.write(json.dumps(row) + "\n")
+    (out_dir / "summary.json").write_text(json.dumps(report, indent=2))
+
+    def pct(block: dict) -> str:
+        return f"{block['acc']:.1%} ({block['correct']}/{block['n']})"
+
+    rprint(f"  baseline correct: {pct(summary['baseline_correct'])}  "
+           f"| base-only (no concepts) knows: {pct(summary['base_knows'])}")
     rprint("  [bold]counterfactual swap[/] (answer edge → false neighbor):")
-    rprint(f"    ALL: follows swap (→ FALSE) [bold]{pct(follow, len(swap_meta))}[/]  "
-           f"sticks to original {pct(stick, len(swap_meta))}  (n={len(swap_meta)})")
+    rprint(f"    ALL: follows swap (→ FALSE) [bold]{pct(summary['swap_follow'])}[/]  "
+           f"sticks to original {pct(summary['swap_stick'])}")
     rprint(f"    [bold]base-UNKNOWN[/] (no parametric memory → clean graph test): "
-           f"follows swap [bold]{pct(unk_follow, len(unk))}[/]  sticks {pct(unk_stick, len(unk))}  "
-           f"(n={len(unk)})")
+           f"follows swap [bold]{pct(summary['swap_follow_base_unknown'])}[/]  "
+           f"sticks {pct(summary['swap_stick_base_unknown'])}")
     rprint("  [bold]edge ablation[/] (of baseline-correct):")
-    rprint(f"    correct after removing ANSWER edge: [bold]{pct(abl_ans_ok, len(abl_ans_meta))}[/]"
-           f" (n={len(abl_ans_meta)})  — want LOW")
-    rprint(f"    correct after removing OTHER edge:  [bold]{pct(abl_oth_ok, len(abl_oth_meta))}[/]"
-           f" (n={len(abl_oth_meta)})  — want HIGH (~baseline)")
+    rprint(f"    correct after removing ANSWER edge: "
+           f"[bold]{pct(summary['ablate_answer_correct'])}[/]  — want LOW")
+    rprint(f"    correct after removing OTHER edge:  "
+           f"[bold]{pct(summary['ablate_other_correct'])}[/]  — want HIGH (~baseline)")
     rprint("[dim]high swap-follow + (low answer-ablation, high other-ablation) = reads the graph "
            "edge-by-edge, not entangled text / parametric memory.[/dim]")
+    rprint(f"[green]wrote[/] {out_dir}/summary.json")
 
 
 @app.command("cf-capability-preservation")
@@ -1676,6 +1711,7 @@ def cf_capability_preservation(
     import torch
 
     from conceptformer.data.snapshot import iter_subgraphs
+    from conceptformer.eval.probes import capability_summary
     from conceptformer.generate.dataset import load_cftrain_qa
     from conceptformer.model.featurizer import featurize_subgraph
     from conceptformer.model.injection import build_position_ids
@@ -1709,7 +1745,7 @@ def cf_capability_preservation(
     # greedy: does injecting concepts change the continuation vs the frozen model alone?
     concept_out = trainer.generate_student_batch(items, max_new=32, system=TEACHER_SYSTEM)
     base_out = trainer._generate_text_batch([(TEACHER_SYSTEM, q) for _, q in items], 32)
-    agree = sum(c.strip() == b.strip() for c, b in zip(concept_out, base_out, strict=True))
+    agree = [c.strip() == b.strip() for c, b in zip(concept_out, base_out, strict=True)]
 
     # next-token KL(concept || base) at the prompt end — how far concepts perturb the distribution.
     @torch.no_grad()
@@ -1736,13 +1772,32 @@ def cf_capability_preservation(
         reduction="none", log_target=True,
     ).sum(-1)
 
+    summary = capability_summary(agree, kl.tolist())
+    report = {
+        "checkpoint": checkpoint, "probe": "capability_preservation", "dataset": dataset,
+        "snapshot": snapshot, "seed": seed, "config": blob["config"], **summary,
+    }
+    out_dir = settings.data_root / "analysis" / "probes" / f"{checkpoint}__capability"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with (out_dir / "items.jsonl").open("w", encoding="utf-8") as fh:
+        for (sg, q), a, x, c, b in zip(
+            items, agree, kl.tolist(), concept_out, base_out, strict=True
+        ):
+            fh.write(json.dumps(
+                {"subject": sg.center.qid, "question": q, "agree": a, "kl": round(x, 6),
+                 "concept_out": c, "base_out": b}
+            ) + "\n")
+    (out_dir / "summary.json").write_text(json.dumps(report, indent=2))
+
+    ga = summary["greedy_agreement"]
     rprint(
         f"[bold]capability preservation[/] {checkpoint} k={trainer.cfg.k}; {len(items)} controls"
     )
-    rprint(f"  greedy-agreement (concept == base output): [bold]{agree / len(items):.1%}[/]")
-    rprint(f"  next-token KL(base-concept): mean [bold]{kl.mean():.4f}[/] "
-           f"median {kl.median():.4f} max {kl.max():.3f}")
+    rprint(f"  greedy-agreement (concept == base output): [bold]{ga['acc']:.1%}[/]")
+    rprint(f"  next-token KL(base-concept): mean [bold]{summary['kl']['mean']:.4f}[/] "
+           f"median {summary['kl']['median']:.4f} max {summary['kl']['max']:.3f}")
     rprint("[dim]high agreement + low KL = concept tokens inert on non-fact tasks = preserved.[/]")
+    rprint(f"[green]wrote[/] {out_dir}/summary.json")
 
 
 @app.command("cf-rag-budget-curve")

@@ -978,6 +978,36 @@ W&B groups `pilot-qwen35-2b`, `pilot-qwen35-2b-vision`; `scripts/pilot_port_comp
 
 ---
 
+## Finding 17 — Zero-shot cross-graph transfer: Wikidata-trained encoders work on MetaQA ✅ (single seed per k)
+
+**Claim.** The inductive claim holds across graphs: checkpoints trained ONLY on Wikidata
+(0.6B, 100k corpus, `pc_k*_best`) score far above base on MetaQA-1hop (movie KG, 43k entities,
+9 relations, no entity ids — label IS identity), evaluated zero-shot with no adaptation.
+
+**Numbers** (FULL test set n=9,947, greedy exact match vs any accepted answer, Wilson CIs;
+2026-07-07): base 5.8% [5.3, 6.2], k1 16.1%, k8 23.5%, k16 24.4%, k32 **33.5%** [32.5, 34.4],
+budgeted RAG (1024 tok, no answer guarantee) 92.1%. Item-paired McNemar concept-vs-base:
+k8 discordants 1874/107, p < 1e-300 (k1: p ~ 5e-233). Adjacent k: k8>k1 p~3e-88,
+k16>k8 p=0.033, k32>k16 p~3e-115 — monotone in k, same shape as home. Relative gap closure
+vs home (base->RAG): k8 21% vs 44%, k32 32% vs 51% — zero-shot transfer retains roughly
+half to two-thirds of the home-graph effect. n=1000 pilot (24.8% k8) confirmed by full run.
+
+**Setup** (`data/metaqa.py`, `build-metaqa-snapshot`, `eval-transfer`): 9 relations mapped to
+natural-language labels + hand-written reverse labels for incoming edges (e.g.
+`starred_actors` -> "cast member"/"actor in"); snapshot `metaqa` sha `d70231425282…`,
+43,234 entities. Re-verify: `data/analysis/transfer/pc_k{1,8,16,32}_best__metaqa_1hop_full/`
+(summary.json + items.jsonl; mirrored to HF `joelbarmettler/conceptformer-data` under
+`results/`). Caveats: **one seed per k** (s0 `pc_k*_best`); 1-hop vanilla split only;
+MetaQA-trained contrast (Phase B) not yet run — do not claim anything about trained transfer.
+
+**Probe durability note (2026-07-07).** `cf-graph-faithfulness` / `cf-capability-preservation`
+now write summary.json + items.jsonl to `data/analysis/probes/<ckpt>__{faithfulness,capability}/`
+(`eval/probes.py`); the F13/F15 sweep re-run over all 18 `pc_k*` checkpoints regenerates them
+as durable artifacts (legacy terminal logs preserved in `data/analysis/probes/legacy_logs/`).
+First re-run cell matches the transcribed values exactly (pc_k1_best swap-follow 0.0%).
+
+---
+
 ## Open questions (not yet evidence-backed — do NOT state as findings)
 
 0. ~~Establish the noise floor + re-test downgraded findings multi-seed (F8).~~ **RESOLVED → F8 +

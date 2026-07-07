@@ -57,7 +57,9 @@
   entities grow $10\times$, and additional tokens partially substitute for additional data.
   Counterfactual edge-swap probes show the model genuinely \emph{reads} the injected graph,
   increasingly so with $k$, while off-topic behavior is preserved (median next-token KL
-  $\le$0.08 nats). ConceptFormer-2 turns a frozen conversational model into an
+  $\le$0.08 nats). The encoder also transfers \emph{zero-shot} to an unseen knowledge graph:
+  on MetaQA-1hop, Wikidata-trained concept tokens lift accuracy from 0.06 to 0.34 without any
+  MetaQA training. ConceptFormer-2 turns a frozen conversational model into an
   entity-grounded QA system at roughly one-tenth the context cost of retrieval, with all
   corpora, checkpoints, and per-item evaluation outputs released.
 \end{abstract}
@@ -102,7 +104,9 @@ entities), tokens partially substitute for data, and we measure the frozen-model
 across the Qwen3 family (\S\ref{sec:scaling}).
 \textbf{(3)}~Causal evidence that the model reads the injected graph --- counterfactual
 edge-swap following that scales from $\sim$1\% ($k{=}1$) to $\sim$34\% ($k{=}32$) --- alongside
-capability preservation and prompt robustness (\S\ref{sec:probes}).
+capability preservation and prompt robustness (\S\ref{sec:probes}), and \emph{zero-shot
+cross-graph transfer}: the Wikidata-trained encoder lifts MetaQA-1hop accuracy from $0.06$ to
+$0.34$ with no MetaQA training (\S\ref{sec:transfer}).
 \textbf{(4)}~An open release: corpora with per-teacher distillation targets, all checkpoints,
 the evaluation harness, and per-item outputs enabling third-party paired re-analysis.
 
@@ -385,6 +389,52 @@ bit-identical to the frozen model. Accuracy is also robust to prompt wording: ac
 system prompts (five seen styles, one held-out), \popqa{} accuracy of the $k{=}8$ model varies
 with a standard deviation of $\le$1.1\,pt across 3 seeds.
 
+\subsection{Zero-shot cross-graph transfer}
+\label{sec:transfer}
+
+\begin{table}[t]
+  \caption{Zero-shot transfer to MetaQA-1hop (full test set, $n{=}9{,}947$; Wilson 95\% CIs).
+  The Wikidata-trained checkpoints of Table~\ref{tab:kfamily} (frozen Qwen3-0.6B, 100k corpus;
+  one seed per $k$) are evaluated unchanged on a movie KG they have never seen --- no MetaQA
+  training, no adaptation, no shared entities or relations. RAG is budgeted verbalization of
+  the same neighborhoods (no answer guarantee).}
+  \label{tab:transfer}
+  \centering
+  \small
+  \begin{tabular}{lcccccc}
+    \toprule
+    & base & $k{=}1$ & $k{=}8$ & $k{=}16$ & $k{=}32$ & RAG\\
+    \midrule
+    accuracy & .058 & .161 & .235 & .244 & \textbf{.335} & .921\\
+    95\% CI & [.053, .062] & [.153, .168] & [.227, .244] & [.235, .252] & [.325, .344] & [.916, .926]\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The featurizer consumes nothing but the frozen model's embeddings of label strings, so a
+trained encoder should apply to \emph{any} labeled graph --- \emph{if} what it learned is the
+edge$\to$concept mapping rather than Wikidata idioms. We test this on MetaQA
+\citep{metaqa}, a movie knowledge graph (43k entities, 9 relations, $\sim$134k triples) with a
+\popqa{}-shaped 1-hop QA benchmark, chosen because it is maximally foreign: no entity
+identifiers (the label string \emph{is} the identity), a disjoint 9-relation vocabulary
+against Wikidata's hundreds, and template-generated, multi-answer questions. Each relation is
+mapped to a natural-language label and each incoming edge to a hand-written reverse reading
+(e.g.\ \texttt{starred\_actors} $\to$ ``cast member''\,/\,``actor in''), each entity's 1-hop
+neighborhood is encoded exactly as in \S\ref{sec:method}, and the Wikidata-trained checkpoints
+are scored as-is.
+
+Injection transfers (Table~\ref{tab:transfer}). At $k{=}32$ the concept condition reaches
+$0.335$ against the frozen base's $0.058$ --- $+27.7$\,pt zero-shot, closing 32\% of the
+base$\to$RAG gap on a graph the encoder has never seen (item-paired McNemar against base:
+$p<10^{-200}$ at every $k$). The curve remains monotone in $k$, and the shape mirrors the
+home-graph curve: the $k{=}16 \to k{=}32$ step alone adds $9.1$\,pt ($p<10^{-114}$).
+Measured as relative gap closure, zero-shot transfer retains roughly half to two-thirds of
+the home-graph effect (21\% vs.\ 44\% at $k{=}8$; 32\% vs.\ 51\% at $k{=}32$). The RAG
+reference ($0.921$) confirms the gap that remains is a property of the transferred encoder,
+not of the frozen model's ability to answer in this domain. Together with the probes of
+\S\ref{sec:probes}, this is direct evidence for the inductive claim: the encoder learned a
+reusable graph$\to$concept mapping, not a Wikidata-specific compression.
+
 \subsection{Ablations}
 
 \begin{table}[t]
@@ -425,12 +475,14 @@ behavioral change from $k$ soft tokens) --- make opposite predictions about whet
 closes the gap, which the grid's 100k cells test directly. \todo{Finalize once 1.7B/4B cells
 land.}
 
-\paragraph{Limitations.} Single knowledge graph (Wikidata) and language (English);
-entity-valued relations only (no literals); evaluation centered on \popqa{} and same-generator
-held-out questions; faithfulness probes cover single-fact questions; corpora are
-teacher-relative by design, so cross-backbone comparisons involve each model's own curriculum;
-augmentation's effect is heterogeneous across seeds. Knowledge is injected for a single
-identified entity mention per prompt; multi-entity composition is untested.
+\paragraph{Limitations.} Training uses a single knowledge graph (Wikidata) and language
+(English); cross-graph evaluation is zero-shot on one 1-hop benchmark (MetaQA, one seed per
+$k$), and transfer \emph{with} in-domain training is untested; entity-valued relations only
+(no literals); evaluation centered on \popqa{} and same-generator held-out questions;
+faithfulness probes cover single-fact questions; corpora are teacher-relative by design, so
+cross-backbone comparisons involve each model's own curriculum; augmentation's effect is
+heterogeneous across seeds. Knowledge is injected for a single identified entity mention per
+prompt; multi-entity composition is untested.
 
 \paragraph{Outlook.} The encoder is modality-agnostic by construction --- its inputs are
 embeddings, not text --- and extending concept tokens to multimodal knowledge (e.g., entity
@@ -441,7 +493,9 @@ images) for natively multimodal frozen models is the subject of ongoing work.
 ConceptFormer-2 shows that a frozen, instruction-tuned language model can be grounded in a
 knowledge graph through $k\!\approx\!8$ learned continuous tokens: $4.6\times$ over the frozen
 base on unseen entities at one-tenth of retrieval's token cost, with causal evidence that the
-graph is genuinely read and the model otherwise undisturbed. The value of the channel has
+graph is genuinely read and the model otherwise undisturbed --- and the learned encoder
+carries over zero-shot to an unseen knowledge graph, closing a third of the base-to-RAG gap
+on MetaQA without ever training on it. The value of the channel has
 measurable structure --- monotone in tokens, multiplicative in data, interacting between the
 two --- and the released corpora, checkpoints, and per-item evaluations make every number in
 this paper re-derivable and extensible.
@@ -461,6 +515,10 @@ runs, and claims were reviewed by the authors. \todo{Funding statements.}
 \newblock In \emph{Companion Proceedings of the ACM Web Conference 2026 (WWW Companion '26)},
   pp.~587--596, 2026. Best paper award, hosting workshop.
   \url{https://doi.org/10.1145/3774905.3794653}. arXiv:2504.07624.
+
+\bibitem{metaqa} Y.~Zhang, H.~Dai, Z.~Kozareva, A.~Smola, and L.~Song.
+\newblock Variational reasoning for question answering with knowledge graph.
+\newblock AAAI 2018; arXiv:1709.04071.
 
 \bibitem{xrag} X.~Cheng, X.~Wang, X.~Zhang, T.~Ge, S.~Chen, F.~Wei, H.~Zhang, and D.~Zhao.
 \newblock xRAG: Extreme context compression for retrieval-augmented generation with one token.
