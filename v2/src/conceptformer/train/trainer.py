@@ -324,10 +324,21 @@ class ConceptTrainer:
         budget = self.cfg.rag_context_tokens
         return verbalize_with_answer(sg, answer_qid, self._count_tokens, budget, rng)
 
+    def _featurize_cpu(self, sg: Subgraph) -> SubgraphFeatures:
+        """Featurize on GPU, cache on CPU.
+
+        The per-entity feature cache must live in host memory: at 100k entities it is
+        ~N_edges x 2 d_llm per entity (~11 GB at d=2048), which parked on the GPU starves
+        training/eval of headroom and produces flaky OOMs at whatever allocation tips the
+        card. The batch paths already move features to the device per step.
+        """
+        f = featurize_subgraph(sg, self.bb.embed_labels)
+        return SubgraphFeatures(edge_features=f.edge_features.cpu(), center=f.center.cpu())
+
     def _cached_features(self, sg: Subgraph) -> SubgraphFeatures:
         qid = sg.center.qid
         if qid not in self._feat_cache:
-            self._feat_cache[qid] = featurize_subgraph(sg, self.bb.embed_labels)
+            self._feat_cache[qid] = self._featurize_cpu(sg)
         return self._feat_cache[qid]
 
     def _render(self, system: str, user: str) -> str:
@@ -493,7 +504,7 @@ class ConceptTrainer:
                 continue
             qid = sg.center.qid
             if qid not in self._feat_cache:
-                self._feat_cache[qid] = featurize_subgraph(sg, self.bb.embed_labels)
+                self._feat_cache[qid] = self._featurize_cpu(sg)
             facts = self._facts(sg, answer_qid)
             label = sg.center.label or sg.center.qid
             for si, system in enumerate(self._systems):
