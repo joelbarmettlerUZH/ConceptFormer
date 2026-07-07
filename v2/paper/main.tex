@@ -103,7 +103,7 @@ $k{=}32$ and a three-way trade structure: data scales injection up ($2.3\times$ 
 entities), tokens partially substitute for data, and we measure the frozen-model-size axis
 across the Qwen3 family (\S\ref{sec:scaling}).
 \textbf{(3)}~Causal evidence that the model reads the injected graph --- counterfactual
-edge-swap following that scales from $\sim$1\% ($k{=}1$) to $\sim$34\% ($k{=}32$) --- alongside
+edge-swap following that scales from $\sim$1\% ($k{=}1$) to $\sim$33\% ($k{=}32$) --- alongside
 capability preservation and prompt robustness (\S\ref{sec:probes}), and \emph{zero-shot
 cross-graph transfer}: the Wikidata-trained encoder lifts MetaQA-1hop accuracy from $0.06$ to
 $0.34$ with no MetaQA training (\S\ref{sec:transfer}).
@@ -209,8 +209,11 @@ multiplicative gate.
 
 \paragraph{Objective.} The teacher is $M$ reading
 $[\text{system}][\text{verbalized } G_e][\text{question}]$; its greedy answer path $y_{1..m}$ is
-stored offline. The student is $M$ reading $[\text{system}][C_k(G_e)][\text{question}]$, with
-the concept block occupying a contiguous unit-step RoPE span. The loss is the token-level
+stored offline. The student is $M$ reading the same question with the concept block
+$C_k(G_e)$ spliced in immediately \emph{before the entity mention}, occupying a contiguous
+unit-step RoPE span. Placement is ablated in Table~\ref{tab:ablations}; we use
+mention-anchored placement throughout because it extends to prompts mentioning multiple
+entities, where each mention would receive its own concept block. The loss is the token-level
 full-vocabulary forward KL along the stored path,
 \begin{equation}
   \mathcal{L} = \frac{\tau^2}{m}\sum_{t=1}^{m}
@@ -375,10 +378,10 @@ A compression system can score well on QA while treating the graph as an opaque 
 signal. Following the deficiency diagnosed across graph-token systems \citep{gteval,sink}, we
 evaluate causally, by intervening on the \emph{input graph} of a trained model and re-encoding:
 (a)~\emph{edge ablation} --- removing the questioned edge collapses accuracy on that question
-(to 28--55\% depending on $k$) while removing an unrelated edge leaves it intact (90--96\%):
+(to 26--58\% depending on $k$) while removing an unrelated edge leaves it intact (90--97\%):
 edges are encoded separably; (b)~\emph{counterfactual swap} --- rewiring the questioned edge to
 a plausible false neighbor flips the model to the \emph{false} answer with probability rising
-monotonically from $\sim$1\% at $k{=}1$ to $\sim$34\% at $k{=}32$
+monotonically from $\sim$1\% at $k{=}1$ to $\sim$33\% at $k{=}32$
 (Figure~\ref{fig:probes}, left; 3 seeds). Since the frozen base solves only 10\% of these
 probes, parametric memory cannot explain the behavior: the concept tokens are causally
 load-bearing, and faithfulness is \emph{capacity-limited rather than absent}. Meanwhile
@@ -449,7 +452,7 @@ reusable graph$\to$concept mapping, not a Wikidata-specific compression.
     ablation & variants & held-out & note\\
     \midrule
     encoder capacity & 10M / 21M / \textbf{70M} / 231M & .423 / .441 / \textbf{.453} / .376 & peak at $\sim$70M; largest is worst\\
-    placement & \textbf{prefix} / before / after / replace & \textbf{.453} / .423 / .434 / .380 & entity-adjacency does not help\\
+    placement & prefix / \textbf{before} / after / replace & .453 / \textbf{.423} / .434 / .380 & \textbf{before} adopted (multi-entity)\\
     prompt augmentation & off / \textbf{on} & .453 / \textbf{.472} & \popqa{} $+2.0$\,pt; pooled $p{=}3{\times}10^{-36}$\\
     neighbor subsampling & \textbf{off} / on & $\Delta \approx 1$\,pt & null; cached teacher is $2\times$ faster\\
     \bottomrule
@@ -457,10 +460,12 @@ reusable graph$\to$concept mapping, not a Wikidata-specific compression.
 \end{table}
 
 Table~\ref{tab:ablations}: encoder capacity peaks near 70M parameters with the 231M encoder
-clearly worst at this budget; placing concepts adjacent to (or in place of) the entity mention
-does not beat a simple prefix; multi-prompt augmentation yields a small but, under pooled
-paired testing, significant gain with real seed heterogeneity; per-step re-sampling of teacher
-distractors is a null at our context budget.
+clearly worst at this budget; placement is a design choice, not an accuracy lever ---
+prefix, before-entity, and after-entity cluster within noise (only \emph{replacing} the
+mention is clearly worse and unstable), and we adopt before-entity for all main results
+because mention-anchoring is what generalizes to multi-entity prompts; multi-prompt
+augmentation yields a small but, under pooled paired testing, significant gain with real seed
+heterogeneity; per-step re-sampling of teacher distractors is a null at our context budget.
 
 \section{Discussion}
 

@@ -1,11 +1,10 @@
 """ConceptFormer-2 paper figures (Figs 3-5): matched k-curves, data x model grid, causal probes.
 
-All accuracy data is read live from data/analysis/eval_final/ (the M7 ground truth), so the
-figures regenerate as grid cells land (missing cells are skipped). The probe panel values are
-transcribed from the faithfulness/capability sweep logs (provenance: W&B group
-phaseC-kfamily-100k checkpoints; seeds s1 = docs/RESEARCH_FINDINGS.md F13/F15 tables, seeds
-s0/s2 = the 2026-07-06 sweep logs) -- re-run cf-graph-faithfulness / cf-capability-preservation
-to re-verify.
+All data is read live from data/analysis/ (the M7 ground truth): accuracies from eval_final/,
+probe panels from probes/<ckpt>__{faithfulness,capability}/summary.json (the durable reports
+written by cf-graph-faithfulness / cf-capability-preservation since 2026-07-07; the 18-cell
+sweep over pc_k* regenerates them). Figures regenerate as cells land; missing cells are
+skipped.
 
 Run: uv run --group viz python scripts/cf2_figures.py
 """
@@ -126,15 +125,27 @@ fig2.savefig(OUT / "fig_grid.png", dpi=150, bbox_inches="tight")
 print("wrote fig_grid.png")
 
 # ----------------------------------------------------------- Fig 5: causal probes vs k
-# Transcribed 3-seed probe results (see module docstring for provenance).
-SWAP = {  # k -> [s0, s1, s2] counterfactual swap-follow, ALL condition, %
-    1: [0.0, 0.8, 2.3], 2: [3.1, 5.3, 3.1], 4: [12.3, 16.5, 14.8],
-    8: [21.4, 25.8, 25.5], 16: [26.6, 29.8, 24.6], 32: [35.3, 34.2, 31.4],
-}
-CAP_KL = {  # k -> [s0, s1, s2] median next-token KL(base||concept) on control tasks, nats
-    1: [0.0695, 0.082, 0.0668], 2: [0.0705, 0.058, 0.0579], 4: [0.0503, 0.061, 0.0539],
-    8: [0.0697, 0.066, 0.0524], 16: [0.0516, 0.075, 0.0515], 32: [0.0755, 0.078, 0.0734],
-}
+PROBES = ROOT / "data/analysis/probes"
+
+
+def probe_values(probe: str, key: tuple[str, ...]) -> dict[int, list[float]]:
+    out: dict[int, list[float]] = {}
+    for k in KS:
+        for name in curve_names("100k", k):
+            p = PROBES / f"{name}__{probe}" / "summary.json"
+            if not p.exists():
+                continue
+            v = json.loads(p.read_text())
+            for part in key:
+                v = v[part]
+            out.setdefault(k, []).append(float(v))
+    return out
+
+
+SWAP = {k: [100 * v for v in vs]  # counterfactual swap-follow, ALL condition, %
+        for k, vs in probe_values("faithfulness", ("swap_follow", "acc")).items()}
+# median next-token KL(base||concept) on control tasks, nats
+CAP_KL = probe_values("capability", ("kl", "median"))
 fig3, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.0))
 means = [statistics.mean(SWAP[k]) for k in KS]
 errs = [statistics.stdev(SWAP[k]) for k in KS]

@@ -1004,7 +1004,13 @@ MetaQA-trained contrast (Phase B) not yet run — do not claim anything about tr
 now write summary.json + items.jsonl to `data/analysis/probes/<ckpt>__{faithfulness,capability}/`
 (`eval/probes.py`); the F13/F15 sweep re-run over all 18 `pc_k*` checkpoints regenerates them
 as durable artifacts (legacy terminal logs preserved in `data/analysis/probes/legacy_logs/`).
-First re-run cell matches the transcribed values exactly (pc_k1_best swap-follow 0.0%).
+All s0/s2 cells reproduce the transcribed values exactly. Every **s1 swap-follow drifted 1--3 pt
+(mixed sign)** vs the F13 table (same command, checkpoint, --n 400 --seed 0); s1 capability KLs
+match. The F13 s1 sweep ran 2026-07-03, before the fla fast-kernel install -- kernel-level logit
+differences flipping a handful of near-tie generations is the working explanation. Qualitative
+curve unchanged (new 3-seed swap means: 1.5/3.5/13.6/23.2/26.4/33.0% for k=1..32; was ~1->34%,
+now ~1->33%). `cf2_figures.py` now reads the probe reports live (hardcoded tables removed);
+the durable artifacts, not the F13/F15 transcriptions, are the source of truth for Fig. 5.
 
 ---
 
