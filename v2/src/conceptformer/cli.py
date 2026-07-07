@@ -1280,6 +1280,123 @@ def _definitive_eval(
     rprint(f"[green]wrote[/] {report_dir}/summary.json (+ per-item jsonl for paired stats)")
 
 
+@app.command("build-metaqa-snapshot")
+def build_metaqa_snapshot(
+    kb: Annotated[str, typer.Option(help="path to MetaQA kb.txt (subject|relation|object)")],
+    name: Annotated[str, typer.Option(help="snapshot name")] = "metaqa",
+) -> None:
+    """Convert the MetaQA movie KB into a ConceptFormer snapshot (cross-graph transfer)."""
+    import hashlib
+
+    from conceptformer.data.metaqa import build_subgraphs
+
+    out_dir = settings.snapshots_dir / name
+    out_dir.mkdir(parents=True, exist_ok=True)
+    sha = hashlib.sha256()
+    n = 0
+    with Path(kb).open(encoding="utf-8") as kb_fh, \
+            (out_dir / "subgraphs.jsonl").open("w", encoding="utf-8") as fh:
+        for sg in build_subgraphs(kb_fh):
+            line = sg.model_dump_json()
+            fh.write(line + "\n")
+            sha.update(line.encode("utf-8"))
+            n += 1
+    manifest = {"name": name, "source": "MetaQA kb.txt (CC BY 3.0)", "n_subgraphs": n,
+                "sha256": sha.hexdigest()}
+    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    rprint(f"[green]wrote[/] {out_dir} ({n} subgraphs, sha {sha.hexdigest()[:12]})")
+
+
+@app.command("eval-transfer")
+def eval_transfer(
+    checkpoint: Annotated[str, typer.Option(help="trained checkpoint name or path")],
+    qa: Annotated[str, typer.Option(help="path to MetaQA-format QA file (bracketed subject)")],
+    snapshot: Annotated[str, typer.Option()] = "metaqa",
+    benchmark: Annotated[str, typer.Option(help="benchmark tag for the report")] = "metaqa_1hop",
+    n: Annotated[int, typer.Option(help="questions to score (0 = all)")] = 2000,
+    gen_batch: Annotated[int, typer.Option()] = 32,
+    max_new: Annotated[int, typer.Option()] = 32,
+    model: Annotated[str, typer.Option()] = "Qwen/Qwen3-0.6B",
+    device: Annotated[str, typer.Option()] = "cuda",
+) -> None:
+    """ZERO-SHOT cross-graph transfer: score a (e.g. Wikidata-trained) checkpoint on another KG.
+
+    The encoder only ever consumes label-string embeddings, so it should transfer to any
+    labeled graph if it learned graph->concept rather than source-graph idioms. Scores the
+    concept condition against the frozen base (floor) and budgeted text-RAG (reference; NO
+    answer guarantee -- the answer edge is whatever the plain top-of-neighborhood budget
+    keeps). Per-item dumps + Wilson CIs, same conventions as eval-final.
+    """
+    from conceptformer.data.metaqa import load_metaqa_qa
+    from conceptformer.data.snapshot import iter_subgraphs
+    from conceptformer.eval.evalsets import EVAL_SAMPLE_SEED, popqa_eval_items
+    from conceptformer.eval.stats import summarize_accuracy
+    from conceptformer.generate.signal import answer_ok
+    from conceptformer.train.trainer import TEACHER_SYSTEM
+    from conceptformer.verbalize import verbalize_budgeted
+
+    trainer, blob, chat = _load_trained_checkpoint(
+        checkpoint, model, device, use_generation_cache=True
+    )
+    sgs = {sg.center.qid: sg for sg in iter_subgraphs(settings.snapshots_dir / snapshot)}
+    with Path(qa).open(encoding="utf-8") as qa_fh:
+        examples = load_metaqa_qa(qa_fh)
+    items = popqa_eval_items(examples, sgs, n=n)  # frozen fixed-seed subset, pairable
+    rprint(f"[bold]zero-shot transfer[/] {checkpoint} -> {benchmark}: n={len(items)} "
+           f"(of {len(examples)} questions, {len(sgs)} entities in graph)")
+
+    concept_preds: list[str] = []
+    for i in range(0, len(items), gen_batch):
+        chunk = items[i : i + gen_batch]
+        concept_preds += trainer.generate_student_batch(
+            [(sg, q) for sg, q, _, _ in chunk], max_new, TEACHER_SYSTEM
+        )
+    base_preds = chat.generate_batch(
+        [(TEACHER_SYSTEM, q) for _, q, _, _ in items],
+        max_new_tokens=max_new, batch_size=gen_batch,
+    )
+    budget = int(trainer.cfg.rag_context_tokens)
+    rag_preds = chat.generate_batch(
+        [(TEACHER_SYSTEM, f"{verbalize_budgeted(sg, chat.count_tokens, budget)}\n\n{q}")
+         for sg, q, _, _ in items],
+        max_new_tokens=max_new, batch_size=gen_batch,
+    )
+    per_item: list[dict] = []
+    concept_flags: list[bool] = []
+    base_flags: list[bool] = []
+    rag_flags: list[bool] = []
+    for (sg, q, gold, _), cp, bp, rp in zip(
+        items, concept_preds, base_preds, rag_preds, strict=True
+    ):
+        c_ok, b_ok, r_ok = answer_ok(cp, gold), answer_ok(bp, gold), answer_ok(rp, gold)
+        concept_flags.append(c_ok)
+        base_flags.append(b_ok)
+        rag_flags.append(r_ok)
+        per_item.append(
+            {"benchmark": benchmark, "subject": sg.center.qid, "question": q,
+             "gold": list(gold), "concept": c_ok, "base": b_ok, "rag": r_ok,
+             "concept_pred": cp}
+        )
+    report = {
+        "checkpoint": checkpoint, "benchmark": benchmark, "snapshot": snapshot,
+        "eval_sample_seed": EVAL_SAMPLE_SEED, "config": blob["config"],
+        "n": len(per_item),
+        "concept": summarize_accuracy(concept_flags),
+        "base": summarize_accuracy(base_flags),
+        "rag": summarize_accuracy(rag_flags),
+    }
+    out_dir = settings.data_root / "analysis" / "transfer" / f"{checkpoint}__{benchmark}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with (out_dir / "items.jsonl").open("w", encoding="utf-8") as fh:
+        for row in per_item:
+            fh.write(json.dumps(row) + "\n")
+    (out_dir / "summary.json").write_text(json.dumps(report, indent=2))
+    c, b, r = report["concept"], report["base"], report["rag"]
+    rprint(f"  concept={c['acc']:.1%} [{c['ci95'][0]:.1%}, {c['ci95'][1]:.1%}]  "
+           f"base={b['acc']:.1%}  rag={r['acc']:.1%}")
+    rprint(f"[green]wrote[/] {out_dir}/summary.json")
+
+
 @app.command("eval-untrained-injection")
 def eval_untrained_injection(
     k: Annotated[int, typer.Option(help="concept slots to fill with top-k edge embeddings")] = 8,
