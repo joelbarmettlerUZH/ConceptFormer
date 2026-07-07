@@ -692,6 +692,9 @@ def cf_train(
     ] = "fact",
     eval_every: Annotated[int, typer.Option()] = 100,
     eval_n: Annotated[int, typer.Option(help="held-out examples scored per eval (capped)")] = 120,
+    eval_gen_batch: Annotated[
+        int, typer.Option(help="generation batch for eval brackets; lower for >=1.7B backbones")
+    ] = 48,
     popqa_eval: Annotated[int, typer.Option(help="after training, score N unseen PopQA")] = 0,
     popqa_snapshot: Annotated[str, typer.Option(help="snapshot with PopQA neighborhoods")] = "popqa_full",  # noqa: E501
     checkpoint: Annotated[str, typer.Option(help="save trained encoder under this name")] = "",
@@ -839,7 +842,9 @@ def cf_train(
     held_in_rows = [r for r in train_rows if is_answerable(r) and r.subject_qid in sg_by_qid]
     train_sample = rng.sample(held_in_rows, min(len(eval_val), len(held_in_rows)))
     held_in_eval = (
-        trainer.build_eval(train_sample, sg_by_qid, eval_system=eval_system)
+        trainer.build_eval(
+            train_sample, sg_by_qid, eval_system=eval_system, gen_batch=eval_gen_batch
+        )
         if train_sample
         else None
     )
@@ -881,7 +886,10 @@ def cf_train(
             log["gen_gap/val_kl"] = m["val_kl"] - mi["val_kl"]
             line += f"  | held_in={mi['concept_acc']:.1%}"
         if popqa_items:
-            pm = trainer.evaluate_popqa(popqa_items, eval_system=eval_system, cache_brackets=True)
+            pm = trainer.evaluate_popqa(
+                popqa_items, eval_system=eval_system, cache_brackets=True,
+                gen_batch=eval_gen_batch,
+            )
             for kk in ("concept_acc", "base_acc", "teacher_acc"):
                 last_metrics[f"popqa_{kk}"] = pm[kk]
                 log[f"popqa/{kk}"] = pm[kk]
@@ -918,7 +926,9 @@ def cf_train(
         step_fn = trainer.step_prepared
         accum_fn = trainer.step_prepared_accum
     eff_batch = batch * accum  # sample the whole effective batch, then split into `accum` micros
-    trainer.setup_eval(eval_val, sg_by_qid, eval_system=eval_system)  # brackets computed once
+    trainer.setup_eval(  # brackets computed once
+        eval_val, sg_by_qid, eval_system=eval_system, gen_batch=eval_gen_batch
+    )
     report("init", 0)
     # Best-held-out checkpoint: at a generous horizon the model can overfit PAST its peak (F4), so
     # the FINAL weights may be worse than the best. Save the best-so-far separately (overwrites one
