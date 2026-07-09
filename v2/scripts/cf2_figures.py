@@ -144,18 +144,34 @@ def probe_values(probe: str, key: tuple[str, ...]) -> dict[int, list[float]]:
 
 SWAP = {k: [100 * v for v in vs]  # counterfactual swap-follow, ALL condition, %
         for k, vs in probe_values("faithfulness", ("swap_follow", "acc")).items()}
+ABL_ANS = probe_values("faithfulness", ("ablate_answer_correct", "acc"))
+ABL_OTH = probe_values("faithfulness", ("ablate_other_correct", "acc"))
 # median next-token KL(base||concept) on control tasks, nats
 CAP_KL = probe_values("capability", ("kl", "median"))
-fig3, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.0))
+fig3, (ax0, ax1, ax2) = plt.subplots(1, 3, figsize=(13.5, 3.8))
+for data, color, marker, label in [
+    (ABL_ANS, ORANGE, "o", "questioned edge removed"),
+    (ABL_OTH, GREEN, "s", "unrelated edge removed"),
+]:
+    m = [100 * statistics.mean(data[k]) for k in KS]
+    e = [100 * statistics.stdev(data[k]) for k in KS]
+    ax0.errorbar(KS, m, yerr=e, fmt=f"{marker}-", color=color, capsize=3, label=label)
+ax0.set_xscale("log", base=2)
+ax0.set_xticks(KS, [str(k) for k in KS])
+ax0.set_ylim(0, 100)
+ax0.set_xlabel("concept tokens $k$")
+ax0.set_ylabel("accuracy on baseline-correct probes (%)")
+ax0.set_title("Edge ablation", fontsize=10)
+ax0.grid(True, alpha=0.25)
+ax0.legend(fontsize=8)
 means = [statistics.mean(SWAP[k]) for k in KS]
 errs = [statistics.stdev(SWAP[k]) for k in KS]
 ax1.errorbar(KS, means, yerr=errs, fmt="o-", color=BLUE, capsize=3)
 ax1.set_xscale("log", base=2)
 ax1.set_xticks(KS, [str(k) for k in KS])
 ax1.set_xlabel("concept tokens $k$")
-ax1.set_ylabel("counterfactual swap-follow (%)")
-ax1.set_title("Reads the graph: rewired edge $\\rightarrow$ rewired answer,\n"
-              "scaling with capacity (3 seeds)", fontsize=10)
+ax1.set_ylabel("swap-follow rate (%)")
+ax1.set_title("Counterfactual swap", fontsize=10)
 ax1.grid(True, alpha=0.25)
 means2 = [statistics.mean(CAP_KL[k]) for k in KS]
 errs2 = [statistics.stdev(CAP_KL[k]) for k in KS]
@@ -165,8 +181,7 @@ ax2.set_xticks(KS, [str(k) for k in KS])
 ax2.set_ylim(0, 0.5)
 ax2.set_xlabel("concept tokens $k$")
 ax2.set_ylabel("median KL(base $\\|$ concept), nats")
-ax2.set_title("Preserves the model: off-topic next-token\ndistribution barely moves (3 seeds)",
-              fontsize=10)
+ax2.set_title("Capability preservation", fontsize=10)
 ax2.grid(True, alpha=0.25)
 fig3.tight_layout()
 fig3.savefig(OUT / "fig_probes.png", dpi=150, bbox_inches="tight")
