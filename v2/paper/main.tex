@@ -128,28 +128,45 @@ follow the graph-to-text encoding line \citep{talklikeagraph}.
 \citep{fivehundredx} train LoRA encoders against frozen decoders with reconstruction
 objectives, and CompLLM \citep{compllm} distills per-segment embeddings through activation
 matching. ARC-Encoder \citep{arcencoder} is the strongest recent text compressor for frozen
-decoders. PISCO \citep{pisco} shares our sequence-distillation approach and reports that
-frozen decoders underperform; at entity granularity, our results show a frozen decoder working
-well. The closest system is xRAG \citep{xrag}, which also injects into the input embeddings of
-a frozen decoder and distills against the same model. However, xRAG translates a single
-pre-existing retriever vector rather than learning a compression, it depends on that retriever
-at inference, and it evaluates neither unseen-entity generalization nor faithfulness.
-Cartridges \citep{cartridges} distills a KV cache per corpus by gradient descent, with no
-amortization across items. None of these systems compress structured input, and none tests
-the compressed representation causally. Post-hoc overflow probing \citep{overflow} is the
-nearest attempt.
+decoders. PISCO \citep{pisco} follows the same principle as our objective, distillation from
+a model that reads the uncompressed text, but implements it with sequence-level distillation
+on teacher-generated answers and LoRA-tunes both compressor and decoder. It reports that a
+frozen decoder clearly underperforms at document granularity; at entity granularity, our
+frozen decoder works well. The closest system is xRAG \citep{xrag}, which injects into the
+input embeddings of a frozen decoder and includes a KL term against the same model reading
+the text. Its training additionally relies on paraphrase pretraining and about one million
+labeled instruction examples. Its representation is a single pre-existing retriever embedding
+passed through a projector, which binds it to that embedding model at inference. Its
+evaluation covers aggregate QA accuracy and robustness to noisy retrieval, and it tests
+neither unseen-entity generalization nor what the compressed representation actually conveys.
+Cartridges \citep{cartridges} distills each corpus into a trainable KV cache by gradient
+descent on self-generated conversations. This amortizes over the queries to one corpus, but
+there is no encoder, so a new corpus requires a fresh optimization run. None of these systems
+compress structured input, and none tests the compressed representation causally. Post-hoc
+overflow probing \citep{overflow} is the nearest attempt.
 
-\paragraph{Knowledge-graph injection into LLMs.} GNP \citep{gnp}, GraphToken \citep{graphtoken},
-G-Retriever \citep{gretriever}, and LLaGA \citep{llaga} encode graphs into soft prompts per
-question, trained with task cross-entropy on labeled QA. None of them precomputes reusable
-per-entity tokens. KBLaM \citep{kblam} precomputes one key--value pair per triple and injects
-it into every attention layer through modified attention, evaluated on synthetic KBs.
-Knowledge Prompts \citep{knowledgeprompts} is the closest precompute precedent, with
-per-entity soft prompts for 1.1M Wikidata entities, but it stores them as a lookup table of
-free parameters, so unseen entities are impossible by construction. Recent analyses find that
-graph-token LLMs ``do not fully understand graph tokens'' \citep{gteval} and that graph tokens
-can decouple from graph semantics \citep{sink}. Our counterfactual evaluation
-(\S\ref{sec:probes}) measures this decoupling directly.
+\paragraph{Knowledge-graph injection into LLMs.} GNP \citep{gnp} and G-Retriever
+\citep{gretriever} retrieve a question-specific subgraph and run a graph encoder over it at
+inference time, so every question pays a retrieval and encoding pass. Both train with
+next-token cross-entropy on labeled tasks, GNP with an auxiliary link-prediction loss, and
+G-Retriever also feeds the retrieved subgraph as plain text. GraphToken \citep{graphtoken}
+encodes small synthetic graphs for graph-reasoning questions; its encoder never reads the
+question, but its graphs contain no entities, and it names factual grounding as future work.
+LLaGA \citep{llaga} projects frozen text-encoder features of a node's sampled neighborhood
+into token space and is structurally the closest to per-entity encoding, but it rebuilds the
+sequence for every instance and targets node classification and link prediction rather than
+factual recall. All four keep the LLM frozen and train the encoder or projector on task
+labels. None of them computes entity tokens once and reuses them across arbitrary prompts.
+KBLaM \citep{kblam} precomputes one key--value pair per triple with a sentence encoder and
+learned adapters, injecting them into every attention layer through a modified attention with
+retrained query heads. New triples need only an encoder pass, but training requires
+supervised QA pairs, and on the one real knowledge base it is tested on, built from Enron
+emails, its accuracy degrades. Knowledge Prompts \citep{knowledgeprompts} learns one soft
+prompt per entity for 1.1M Wikidata entities as free parameters in a lookup table, so
+covering a new entity means training a fresh prompt; no encoder exists to produce one. Recent
+analyses find that graph-token LLMs ``do not fully understand graph tokens'' \citep{gteval}
+and that graph tokens can decouple from graph semantics \citep{sink}. Our counterfactual
+evaluation (\S\ref{sec:probes}) measures this decoupling directly.
 
 \section{Method}
 \label{sec:method}
@@ -200,7 +217,9 @@ padded edges masked), self-attend, and pass through a feed-forward block
 ($d_{\text{model}}{=}1024$, $L{=}4$, roughly 70M parameters; Table~\ref{tab:ablations} ablates
 this capacity). An output projection maps the queries to $\mathbb{R}^{k \times d}$. The
 projection is zero-initialized, so at step~0 the student is bit-identical to the frozen
-model.
+model. Because the encoder input is only the entity's neighborhood, the concept tokens are
+independent of the question: they can be computed once per entity and cached, and an unseen
+entity needs a single encoder forward pass.
 
 \paragraph{Objective.} The teacher is $M$ reading
 $[\text{system}][\text{verbalized } G_e][\text{question}]$, and its greedy answer path
