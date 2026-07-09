@@ -390,7 +390,7 @@ partially substitutes for training data.
     \midrule
     Qwen3-0.6B & .103 & $.210{\pm}.012$ (+10.7) & $.477{\pm}.002$ (+37.4) & $3.5\times$ (margin) & 6 / 3\\
     Qwen3-1.7B & .141 & $.203{\pm}.003$ (+6.2) & $.271{\pm}.027$ (+13.1) & $2.1\times$ (margin) & 3 / 2\\
-    Qwen3-4B & .154 & $.237{\pm}.003$ (+8.2) & pending & --- & 2 / ---\\
+    Qwen3-4B & .154 & $.237{\pm}.002$ (+8.2) & pending & --- & 3 / ---\\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -408,7 +408,7 @@ moves only from 0.10 to 0.15 across the family and the RAG ceiling stays near 0.
 Two observations sharpen the picture. The 1.7B held-out accuracy barely moves across the data
 step ($0.397 \to 0.418$) where the 0.6B gains 13 points. The encoder trains equally well on
 the bigger backbone, and what shrinks is specifically the payoff on unseen entities. And the
-axis is not monotone: the 4B margin at 10k (+8.2\,pt, two closely agreeing seeds) lies above
+axis is not monotone: the 4B margin at 10k (+8.2\,pt, three seeds within 0.5\,pt) lies above
 the 1.7B margin (+6.2\,pt), which would be consistent with larger models using injected
 context better. The teacher-relative curricula remain a candidate confound here, since a
 stronger base tiers a different question mix into its training corpus.
