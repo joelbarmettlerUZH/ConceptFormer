@@ -202,5 +202,9 @@ knowledge injection). Never quote a pre-M7 number in the paper.
   or `state="finished"`. `scan_history` can also page oddly — sanity-check row counts.
 - **`CUDA_VISIBLE_DEVICES=N` + `--device cuda:N` = crash** (use `--device cuda:0`).
 - **`batch 64` OOMs** on 24 GB.
+- **Host-RAM OOM at 100k-corpus prepare():** ~915k rows peak near the 124 GB box limit; the kernel
+  OOM-kills python silently after ~2h of "preprocessing" (`journalctl -k` shows it; the `|| echo
+  FAILED` chain then "succeeds"). Fixed by storing teacher ctx ids as `array('i')` in `Prepared`;
+  if it recurs, check what else on the box holds RAM before blaming the code.
 - Source must be ASCII (ruff RUF flags en-dash/×/≈); 100-char lines; keep ruff+ty+pytest green.
 - Commit/push **only when asked**; never commit `data/`, checkpoints, or `memory/`.

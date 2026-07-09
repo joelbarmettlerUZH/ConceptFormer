@@ -18,7 +18,8 @@ from __future__ import annotations
 import contextlib
 import math
 import random
-from collections.abc import Callable, Iterator
+from array import array
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -191,7 +192,10 @@ class Prepared:
     """
 
     qid: str
-    teacher_ctx_ids: list[int]
+    # array('i'), not list[int]: at 915k rows the ~1.1k-token teacher contexts as Python int
+    # lists peak past the 124 GB host RAM (the kernel OOM-killed three 100k-corpus launches);
+    # 4-byte array storage cuts that term ~9x. The short student/path lists stay lists.
+    teacher_ctx_ids: Sequence[int]
     student_head_ids: list[int]  # tokens BEFORE the concept slot (system + any question prefix)
     student_tail_ids: list[int]  # tokens AFTER the concept slot (rest of question + chat close)
     path: list[int]
@@ -508,7 +512,7 @@ class ConceptTrainer:
             facts = self._facts(sg, answer_qid)
             label = sg.center.label or sg.center.qid
             for si, system in enumerate(self._systems):
-                ctx_ids = self._ids(self._render(system, f"{facts}\n\n{question}"))
+                ctx_ids = array("i", self._ids(self._render(system, f"{facts}\n\n{question}")))
                 head_ids, tail_ids = self._student_split(system, question, label)
                 prepared.append(Prepared(qid, ctx_ids, head_ids, tail_ids, path, system_idx=si))
         if self.cfg.cache_teacher:
@@ -524,7 +528,7 @@ class ConceptTrainer:
         ~320 MB for ~8k examples vs ~48 GB if we cached full logits.
         """
         for chunk in _chunks(rows, chunk_size):
-            embeds = [self._embed(r.teacher_ctx_ids + r.path) for r in chunk]
+            embeds = [self._embed([*r.teacher_ctx_ids, *r.path]) for r in chunk]
             ctx = [len(r.teacher_ctx_ids) for r in chunk]
             plens = [len(r.path) for r in chunk]
             t_in, t_attn = pack_embeddings(embeds)
@@ -552,7 +556,7 @@ class ConceptTrainer:
 
     def _live_teacher(self, batch: list[Prepared], path_lens: list[int]) -> tuple[Tensor, Tensor]:
         """Teacher logits via a live forward (fallback when the teacher cache is disabled)."""
-        teacher_embeds = [self._embed(p.teacher_ctx_ids + p.path) for p in batch]
+        teacher_embeds = [self._embed([*p.teacher_ctx_ids, *p.path]) for p in batch]
         teacher_ctx = [len(p.teacher_ctx_ids) for p in batch]
         t_in, t_attn = pack_embeddings(teacher_embeds)
         with torch.no_grad():
