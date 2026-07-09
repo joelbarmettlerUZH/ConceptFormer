@@ -171,3 +171,53 @@ ax2.grid(True, alpha=0.25)
 fig3.tight_layout()
 fig3.savefig(OUT / "fig_probes.png", dpi=150, bbox_inches="tight")
 print("wrote fig_probes.png")
+
+# ------------------------------------------- Fig 6: cross-graph transfer (relative gap closure)
+TRANSFER = ROOT / "data/analysis/transfer"
+
+
+def closure(c: float, b: float, r: float) -> float:
+    return 100 * (c - b) / (r - b)
+
+
+home_x, home_y, home_e = [], [], []
+for k in KS:
+    vals = []
+    for name in curve_names("100k", k):
+        p = EF / name / "summary.json"
+        if not p.exists():
+            continue
+        d = json.loads(p.read_text())["popqa"]
+        vals.append(closure(d["concept"]["acc"], d["base"]["acc"], d["rag"]["acc"]))
+    if vals:
+        home_x.append(k)
+        home_y.append(statistics.mean(vals))
+        home_e.append(statistics.stdev(vals) if len(vals) > 1 else 0.0)
+mq_x, mq_y, mq_e = [], [], []
+for k in KS:
+    p = TRANSFER / f"pc_k{k}_best__metaqa_1hop_full" / "summary.json"
+    if not p.exists():
+        continue
+    d = json.loads(p.read_text())
+    c, b, r = d["concept"], d["base"], d["rag"]
+    mq_x.append(k)
+    mq_y.append(closure(c["acc"], b["acc"], r["acc"]))
+    # Single checkpoint: propagate the concept Wilson CI through the closure (brackets fixed).
+    half = (c["ci95"][1] - c["ci95"][0]) / 2
+    mq_e.append(100 * half / (r["acc"] - b["acc"]))
+fig4, ax = plt.subplots(figsize=(6.2, 4.0))
+ax.errorbar(home_x, home_y, yerr=home_e, fmt="o-", color=BLUE, capsize=3,
+            label="Wikidata (home): PopQA, unseen entities")
+ax.errorbar(mq_x, mq_y, yerr=mq_e, fmt="D--", color=ORANGE, capsize=3,
+            label="MetaQA (zero-shot): unseen graph")
+ax.set_xscale("log", base=2)
+ax.set_xticks(KS, [str(k) for k in KS])
+ax.set_xlabel("concept tokens $k$")
+ax.set_ylabel("base$\\rightarrow$RAG gap closed (%)")
+ax.set_title("Same encoder, two graphs: transfer keeps the shape\nof the $k$-curve at "
+             "roughly half the effect", fontsize=10)
+ax.grid(True, alpha=0.25)
+ax.legend(fontsize=9, loc="upper left")
+fig4.tight_layout()
+fig4.savefig(OUT / "fig_transfer.png", dpi=150, bbox_inches="tight")
+print("wrote fig_transfer.png")
