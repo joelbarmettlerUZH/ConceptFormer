@@ -103,6 +103,18 @@ model-size-dependent memory-collapse point — ammunition for the context-side/f
    with NO labeled QA (self-distillation) and evaluated causally. G-Retriever's own hallucination
    analysis (single graph embedding cannot carry full structure) argues *for* v2's k>1 latent
    queries.
+   **CORRECTION (2026-07-09, source-verified via hf papers; paper S2 fixed accordingly):**
+   "per-QUESTION" is only true for GNP + G-Retriever. GraphToken's encoder never reads the
+   question (synthetic graphs, no entities, factual grounding named as future work). LLaGA
+   encodes NODES question-independently (inductive text-encoder features, zero-shot to unseen
+   graphs) but rebuilds sequences per instance and targets node classification / link
+   prediction. The defensible scoped claim: none computes entity tokens ONCE and reuses them
+   across arbitrary prompts, and none trains without task labels. Also verified: KBLaM evals
+   on synthetic + real Enron-derived KB (not "synthetic only") and handles unseen triples via
+   its encoder; PISCO = sequence-level distillation + LoRA both sides (our objective is
+   token-level KL in PISCO's taxonomy — never say "we share PISCO's sequence distillation");
+   xRAG training uses paraphrase pretraining + ~1M labeled instruction examples on top of its
+   KL term.
 
 ## 3. Axis C — adjacent lineages (context for the grant)
 
