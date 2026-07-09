@@ -110,8 +110,8 @@ outputs, enabling paired re-analysis of every reported comparison.
 \label{sec:related}
 
 \paragraph{Lineage.} The problem framing descends from work that probes language models as
-knowledge bases \citep{lama,roberts} and its long-tail refinement \citep{headtotail,emptyshelves},
-with RAG \citep{rag} as the deployed remedy. Knowledge-enhanced pretrained models such as
+knowledge bases \citep{lama,roberts} and its long-tail refinement
+\citep{headtotail,emptyshelves,ftvsrag}, with RAG \citep{rag} as the deployed remedy. Knowledge-enhanced pretrained models such as
 KnowBERT \citep{knowbert}, K-BERT \citep{kbert}, and K-Adapter \citep{kadapter} inject graph
 signal by modifying the model itself, which our frozen-model constraint rules out.
 ConceptFormer v1 \citep{cfv1} injected pretrained KG node embeddings (TransE-family vectors at
@@ -128,7 +128,12 @@ follow the graph-to-text encoding line \citep{talklikeagraph}.
 \citep{fivehundredx} train LoRA encoders against frozen decoders with reconstruction
 objectives, and CompLLM \citep{compllm} distills per-segment embeddings through activation
 matching. ARC-Encoder \citep{arcencoder} is the strongest recent text compressor for frozen
-decoders. PISCO \citep{pisco} follows the same principle as our objective, distillation from
+decoders. IC-Former \citep{icformer} is architecturally the closest compressor: learnable
+digest tokens cross-attend over the LLM's word embeddings in a small standalone encoder. A
+parallel personalization line builds reusable per-user embeddings with resamplers for frozen
+LLMs \citep{userllm,persoma}; these are per-entity soft tokens in structure, without graph
+input and without label-free training. PISCO \citep{pisco} follows the same principle as our
+objective, distillation from
 a model that reads the uncompressed text, but implements it with sequence-level distillation
 on teacher-generated answers and LoRA-tunes both compressor and decoder. It reports that a
 frozen decoder clearly underperforms at document granularity; at entity granularity, our
@@ -141,15 +146,23 @@ evaluation covers aggregate QA accuracy and robustness to noisy retrieval, and i
 neither unseen-entity generalization nor what the compressed representation actually conveys.
 Cartridges \citep{cartridges} distills each corpus into a trainable KV cache by gradient
 descent on self-generated conversations. This amortizes over the queries to one corpus, but
-there is no encoder, so a new corpus requires a fresh optimization run. None of these systems
-compress structured input, and none tests the compressed representation causally. Post-hoc
-overflow probing \citep{overflow} is the nearest attempt.
+there is no encoder, so a new corpus requires a fresh optimization run. The same
+teacher-reads-text principle also appears outside the input space: prompt distillation
+\citep{promptdistill} tunes LoRA adapters toward the same model reading new documents,
+context distillation refines this in weight space \citep{disc}, and KV-Distill
+\citep{kvdistill} applies the KL objective to compress KV caches. A systematic study of
+gist-token compression \citep{gistsurvey} catalogs what such representations drop, including
+the counterfactual failures our probes target. None of these systems compress structured
+input, and none tests the compressed representation causally. Post-hoc overflow probing
+\citep{overflow} is the nearest attempt.
 
 \paragraph{Knowledge-graph injection into LLMs.} GNP \citep{gnp} and G-Retriever
 \citep{gretriever} retrieve a question-specific subgraph and run a graph encoder over it at
 inference time, so every question pays a retrieval and encoding pass. Both train with
 next-token cross-entropy on labeled tasks, GNP with an auxiliary link-prediction loss, and
-G-Retriever also feeds the retrieved subgraph as plain text. GraphToken \citep{graphtoken}
+G-Retriever also feeds the retrieved subgraph as plain text. LGPT \citep{lgpt} refines this
+family with learnable graph pooling tokens, still computed per question. GraphToken
+\citep{graphtoken}
 encodes small synthetic graphs for graph-reasoning questions; its encoder never reads the
 question, but its graphs contain no entities, and it names factual grounding as future work.
 LLaGA \citep{llaga} projects frozen text-encoder features of a node's sampled neighborhood
@@ -161,7 +174,12 @@ KBLaM \citep{kblam} precomputes one key--value pair per triple with a sentence e
 learned adapters, injecting them into every attention layer through a modified attention with
 retrained query heads. New triples need only an encoder pass, but training requires
 supervised QA pairs, and on the one real knowledge base it is tested on, built from Enron
-emails, its accuracy degrades. Knowledge Prompts \citep{knowledgeprompts} learns one soft
+emails, its accuracy degrades. SR-KI \citep{srki} scales the same recipe to tens of thousands
+of triples with a supervised attention loss; its per-triple latents are reusable, but
+training requires labeled QA and the injected units are flat triples rather than compressed
+neighborhoods. ReaLM \citep{realm} quantizes pretrained KG embeddings into discrete tokens in
+the LLM vocabulary for knowledge-graph completion, which trains the vocabulary and targets a
+different task. Knowledge Prompts \citep{knowledgeprompts} learns one soft
 prompt per entity for 1.1M Wikidata entities as free parameters in a lookup table, so
 covering a new entity means training a fresh prompt; no encoder exists to produce one. Recent
 analyses find that graph-token LLMs ``do not fully understand graph tokens'' \citep{gteval}
@@ -410,8 +428,11 @@ stronger base tiers a different question mix into its training corpus.
 \end{figure}
 
 A compression system can score well on QA while treating the graph as an opaque signal, a
-deficiency diagnosed across graph-token systems \citep{gteval,sink}. We therefore intervene
-on the input graph of a trained model, re-encode it, and observe the answer.
+deficiency diagnosed across graph-token systems \citep{gteval,sink}. Existing checks are
+correlational: diagnostic probes on resampler tokens in vision-language systems
+\citep{lostinspace} and controlled edits of textual reasoning structures
+\citep{breakingchain}. We instead intervene on the input graph of a trained model, re-encode
+it, and observe the answer.
 
 Edge ablation removes single edges. Removing the questioned edge collapses accuracy on that
 question, while removing an unrelated edge leaves it intact (Figure~\ref{fig:probes}, left).
@@ -466,7 +487,11 @@ accuracy of the $k{=}8$ model varies with a standard deviation of at most 1.1\,p
 
 The featurizer consumes nothing but the frozen model's embeddings of label strings, so a
 trained encoder should in principle work on any labeled graph. Only an encoder that learned a
-general edge-to-concept mapping will actually do so. We test this on MetaQA \citep{metaqa}, a
+general edge-to-concept mapping will actually do so. Transfer of this kind has precedent for
+graph retrievers, whose graph foundation models generalize to unseen datasets while the LLM
+still reads text \citep{gfmrag}, and graph-token systems reach new domains through
+multi-domain instruction tuning \citep{uniglm}. Zero-shot transfer of the token interface
+itself has, to our knowledge, not been shown before. We test this on MetaQA \citep{metaqa}, a
 movie knowledge graph with 43k entities, 9 relations, and a 1-hop QA benchmark in the same
 style as \popqa{}. The graph shares nothing with Wikidata. It has no entity identifiers (the
 label string is the identity), its 9 relations are disjoint from Wikidata's relation
@@ -522,9 +547,13 @@ step has no effect at our context budget.
 opposite predictions. Under a ceiling reading, a bigger base knows more of the benchmark,
 leaves less headroom, and more data recovers proportionally more of what remains. Under a
 steerability reading, a bigger frozen model needs more training signal per unit of behavioral
-change from $k$ soft tokens, and the data gain itself shrinks with model size. Our grid
-supports steerability: headroom is nearly constant across the family, yet the data gain
-shrinks (\S\ref{sec:scaling}). The 4B result at 10k complicates the picture, since the axis
+change from $k$ soft tokens, and the data gain itself shrinks with model size. Theory
+supports the second reading: soft prompts can bias a frozen model's attention outputs but
+cannot create new attention patterns, so they elicit rather than teach \citep{petrov}.
+Empirically, prompt-tuning gains track base-model scale in fine-tuning scaling laws
+\citep{scalingft}, and the marginal utility of retrieval also depends on model scale and
+pretraining saturation \citep{memorizeretrieve}. Our grid supports steerability: headroom is
+nearly constant across the family, yet the data gain shrinks (\S\ref{sec:scaling}). The 4B result at 10k complicates the picture, since the axis
 does not decay monotonically. The 4B$\times$100k cell would separate the two effects and is
 left to future work.
 
@@ -572,6 +601,90 @@ funding.
 \newblock In \emph{Companion Proceedings of the ACM Web Conference 2026 (WWW Companion '26)},
   pp.~587--596, 2026. Best paper award, hosting workshop.
   \url{https://doi.org/10.1145/3774905.3794653}. arXiv:2504.07624.
+
+\bibitem{ftvsrag} H.~Soudani, E.~Kanoulas, and F.~Hasibi.
+\newblock Fine tuning vs.\ retrieval augmented generation for less popular knowledge.
+\newblock SIGIR-AP 2024; arXiv:2403.01432.
+
+\bibitem{icformer} X.~Wang, Z.~Chen, Z.~Xie, T.~Xu, Y.~He, and E.~Chen.
+\newblock In-context former: Lightning-fast compressing context for large language model.
+\newblock EMNLP Findings 2024; arXiv:2406.13618.
+
+\bibitem{userllm} L.~Ning, L.~Liu, J.~Wu, N.~Wu, D.~Berlowitz, S.~Prakash, B.~Green,
+  S.~O'Banion, and J.~Xie.
+\newblock User-LLM: Efficient LLM contextualization with user embeddings.
+\newblock arXiv:2402.13598, 2024.
+
+\bibitem{persoma} L.~Hebert, K.~Sayana, A.~Jash, A.~Karatzoglou, S.~Sodhi, S.~Doddapaneni,
+  Y.~Cai, and D.~Kuzmin.
+\newblock PERSOMA: Personalized soft prompt adapter architecture for personalized language
+  prompting.
+\newblock arXiv:2408.00960, 2024.
+
+\bibitem{promptdistill} K.~Kujanp\"a\"a, P.~Marttinen, H.~Valpola, and A.~Ilin.
+\newblock Efficient knowledge injection in LLMs via self-distillation.
+\newblock arXiv:2412.14964, 2024.
+
+\bibitem{disc} S.~Padmanabhan, M.~O.~Gul, and T.~Goyal.
+\newblock Updating parametric knowledge with context distillation retains post-training
+  capabilities.
+\newblock arXiv:2602.16093, 2026.
+
+\bibitem{kvdistill} V.~Chari, G.~Qin, and B.~Van~Durme.
+\newblock KV-Distill: Nearly lossless learnable context compression for LLMs.
+\newblock arXiv:2503.10337, 2025.
+
+\bibitem{gistsurvey} C.~Deng, Z.~Zhang, K.~Mao, S.~Li, X.~Huang, D.~Yu, and Z.~Dou.
+\newblock A silver bullet or a compromise for full attention? A comprehensive study of gist
+  token-based context compression.
+\newblock arXiv:2412.17483, 2024.
+
+\bibitem{lgpt} W.~Kim, B.~Park, and W.~Kim.
+\newblock Query-aware learnable graph pooling tokens as prompt for large language models.
+\newblock arXiv:2501.17549, 2025.
+
+\bibitem{srki} B.~Yu, W.~Huang, and K.~Liu.
+\newblock SR-KI: Scalable and real-time knowledge integration into LLMs via supervised
+  attention.
+\newblock arXiv:2511.06446, 2025.
+
+\bibitem{realm} W.~Guo, X.~Wang, J.~Chen, L.~Guo, Z.~Li, and Z.~Chen.
+\newblock ReaLM: Residual quantization bridging knowledge graph embeddings and large language
+  models.
+\newblock arXiv:2510.09711, 2025.
+
+\bibitem{gfmrag} L.~Luo, Z.~Zhao, G.~Haffari, D.~Phung, C.~Gong, and S.~Pan.
+\newblock GFM-RAG: Graph foundation model for retrieval augmented generation.
+\newblock arXiv:2502.01113, 2025.
+
+\bibitem{uniglm} H.~Chen, X.~Wang, J.~Chao, L.~Feng, and W.~Zhu.
+\newblock A unified graph language model for multi-domain multi-task graph alignment
+  instruction tuning.
+\newblock arXiv:2605.12197, 2026.
+
+\bibitem{lostinspace} G.~Pantazopoulos, A.~Suglia, O.~Lemon, and A.~Eshghi.
+\newblock Lost in space: Probing fine-grained spatial understanding in vision and language
+  resamplers.
+\newblock NAACL 2024; arXiv:2404.13594.
+
+\bibitem{breakingchain} O.~Somov, M.~Chaichuk, G.~Ershov, K.~Vafin, M.~Seleznyov,
+  A.~Panchenko, and E.~Tutubalina.
+\newblock Breaking the chain: A causal analysis of LLM faithfulness to intermediate
+  structures.
+\newblock arXiv:2603.16475, 2026.
+
+\bibitem{petrov} A.~Petrov, P.~H.~S.~Torr, and A.~Bibi.
+\newblock When do prompting and prefix-tuning work? A theory of capabilities and limitations.
+\newblock ICLR 2024; arXiv:2310.19698.
+
+\bibitem{scalingft} B.~Zhang, Z.~Liu, C.~Cherry, and O.~Firat.
+\newblock When scaling meets LLM finetuning: The effect of data, model and finetuning method.
+\newblock ICLR 2024; arXiv:2402.17193.
+
+\bibitem{memorizeretrieve} K.~Singh, M.~Yu, V.~Gangal, Z.~Tao, S.~Kumar, E.~Liu, and
+  S.~Y.~Feng.
+\newblock To memorize or to retrieve: Scaling laws for RAG-considerate pretraining.
+\newblock arXiv:2604.00715, 2026.
 
 \bibitem{ptuningv2} X.~Liu, K.~Ji, Y.~Fu, W.~L.~Tam, Z.~Du, Z.~Yang, and J.~Tang.
 \newblock P-Tuning v2: Prompt tuning can be comparable to fine-tuning universally across

@@ -185,3 +185,33 @@ top-k mean-edge-embedding injection (implemented, `eval-untrained-injection`), (
 text retrieval + budgeted LLM summaries at matched token budgets (implemented,
 `cf-rag-budget-curve --retrieval question|summary`), and cite-and-differentiate KBLaM + Knowledge
 Prompts + GNP/GraphToken in related work (section 2 wording).
+
+## 6. Sweep 2026-07-09 (hf papers, two parallel agents; dedup vs sections 1-3)
+
+**Added to paper (18 new cites):** ftvsrag 2403.01432, icformer 2406.13618, userllm 2402.13598,
+persoma 2408.00960, promptdistill 2412.14964 (CLOSEST objective: same-model teacher-reads-text
+KL, but into LoRA weights, needs generated QA), disc 2602.16093, kvdistill 2503.10337,
+gistsurvey 2412.17483 ("lost if surprise" = our swap-probe failure mode), lgpt 2501.17549,
+srki 2511.06446 (KBLaM successor, reusable per-triple latents, supervised attention -> must
+defuse), realm 2510.09711 (per-entity discrete tokens, trained vocab, KGC task), gfmrag
+2502.01113 (zero-shot cross-graph but retriever-level, LLM reads text), uniglm 2605.12197,
+lostinspace 2404.13594 (probing resampler tokens, correlational only), breakingchain
+2603.16475, petrov 2310.19698 (soft prompts elicit, cannot teach -> steerability theory),
+scalingft 2402.17193, memorizeretrieve 2604.00715 (RAG utility is scale-dependent).
+
+**Doc-only / grant-relevant:** CAG 2412.15605, E2P 2505.17051, DAST 2502.11493, C3 2511.15244,
+Gist-COCO 2402.16058, SelfCP 2405.17052, GistPool 2504.08934, K-ON 2502.06257, SpreadsheetLLM
+2407.09025, steering reliability 2504.04635, memory-token capacity vs scale 2506.15001, soft
+task-embedding injection 2507.20906, steerability testbed 2606.11599, knowledge-injection
+survey 2502.10708, GTSQA 2511.04473 (candidate SECOND transfer benchmark: Wikidata-derived,
+unseen structures), G-reasoner 2509.24276, BYOKG-RAG 2507.04127, GraphRAG-Bench 2506.05690,
+CoLoTa 2504.14462 (long-tail successor benchmark), KG-ICL 2410.12288 + ULTRA 2310.04562
+(inductive-KG lineage), ARC-JSD 2505.16415, attention-vs-graph 2505.02130, knowledge homophily
+2505.19286, OPCD 2602.12275, GCD 2411.15927, data-centric compression 2602.01778; multimodal
+grant cluster: EDT-Former 2602.02742, Mario 2603.05181, KORE 2510.19316, multimodal GFM
+2602.04116, PEFT-scaling 2606.02437.
+
+**Gaps confirmed by both agents (claimable):** no counterfactual interventions on injected
+graph/soft tokens anywhere; no zero-shot cross-graph transfer of a TOKEN-level KG-LLM
+interface; no label-free graph-to-token training; no report of injected-margin anti-scaling
+with frozen-model size (frame via petrov + scalingft + memorizeretrieve).
