@@ -389,7 +389,7 @@ partially substitutes for training data.
     backbone & base & 10k entities & 100k entities & data gain & seeds\\
     \midrule
     Qwen3-0.6B & .103 & $.210{\pm}.012$ (+10.7) & $.477{\pm}.002$ (+37.4) & $3.5\times$ (margin) & 6 / 3\\
-    Qwen3-1.7B & .141 & $.203{\pm}.003$ (+6.2) & $.271{\pm}.027$ (+13.1) & $2.1\times$ (margin) & 3 / 2\\
+    Qwen3-1.7B & .141 & $.203{\pm}.003$ (+6.2) & $.271{\pm}.019$ (+13.0) & $2.1\times$ (margin) & 3 / 3\\
     Qwen3-4B & .154 & $.237{\pm}.002$ (+8.2) & pending & --- & 3 / ---\\
     \bottomrule
   \end{tabular}
@@ -562,8 +562,9 @@ English Wikidata. Only entity-valued relations are modeled, so literals such as 
 quantities are absent. Evaluation centers on \popqa{} and on held-out questions from the same
 generator, and the faithfulness probes cover single-fact questions. Cross-graph evaluation is
 zero-shot on one benchmark with one seed per $k$, and transfer with in-domain training is
-untested. The newest grid cells carry fewer than three seeds (Table~\ref{tab:grid}), and the
-4B$\times$100k cell is pending. Corpora are teacher-relative, so cross-backbone comparisons
+untested. The 4B$\times$100k cell of the grid is pending, and the 1.7B$\times$100k cell shows
+the grid's widest seed spread ($\pm$1.9\,pt). Corpora are teacher-relative, so cross-backbone
+comparisons
 involve each model's own curriculum. Knowledge is injected for one identified entity mention
 per prompt, multi-entity composition is untested, and neighborhoods are 1-hop.
 
