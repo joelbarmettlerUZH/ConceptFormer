@@ -55,8 +55,9 @@
   $k{=}32$ on matched curves at two corpus scales, exposing a three-way trade between token
   budget, training data, and model size: unseen-entity accuracy grows $2.3\times$ when training
   entities grow $10\times$, additional tokens partially substitute for additional data, and
-  across the Qwen3 family the injected margin shrinks as the frozen model grows --- with the
-  same data step buying the 1.7B model half the relative gain it buys the 0.6B.
+  across the Qwen3 family the injected margin shrinks as the frozen model grows --- and the
+  same data step multiplies the 1.7B model's margin $2.1\times$ where it multiplies the
+  0.6B's $3.5\times$: more data does not close the model-size gap.
   Counterfactual edge-swap probes show the model genuinely \emph{reads} the injected graph,
   increasingly so with $k$, while off-topic behavior is preserved (median next-token KL
   $\le$0.08 nats). The encoder also transfers \emph{zero-shot} to an unseen knowledge graph:
@@ -367,8 +368,8 @@ transmit.
     backbone & base & 10k entities & 100k entities & data gain & seeds\\
     \midrule
     Qwen3-0.6B & .103 & $.210{\pm}.012$ (+10.7) & $.477{\pm}.002$ (+37.4) & $3.5\times$ (margin) & 6 / 3\\
-    Qwen3-1.7B & .141 & $.203{\pm}.003$ (+6.2) & $.253$ (+11.2) & $1.8\times$ (margin) & 3 / 1\\
-    Qwen3-4B & .154 & $.234$ (+8.0) & pending & --- & 1 / ---\\
+    Qwen3-1.7B & .141 & $.203{\pm}.003$ (+6.2) & $.271{\pm}.027$ (+13.1) & $2.1\times$ (margin) & 3 / 2\\
+    Qwen3-4B & .154 & $.237{\pm}.003$ (+8.2) & pending & --- & 2 / ---\\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -380,17 +381,20 @@ knows more of \popqa{} parametrically --- gain less from injection at fixed data
 does more data close the gap? The answer to the first question is yes, and to the second, no:
 the 1.7B's injected margin is roughly half the 0.6B's at \emph{both} corpus scales, and the
 $10\times$ data step that multiplies the 0.6B margin $3.5\times$ multiplies the 1.7B margin
-only $1.8\times$ --- at 100k entities the 1.7B (+11.2\,pt) barely reaches what the 0.6B
-already had at 10k (+10.7\,pt). Headroom does not explain this: base accuracy moves only
-$0.10 \to 0.15$ across the family while the RAG ceiling stays at $\sim$0.97, yet relative gap
-closure at 100k falls from 44\% (0.6B) to 14\% (1.7B). Two further observations sharpen the
-picture. First, the 1.7B's \emph{held-out} accuracy is flat across the data step
-($0.397 \to 0.403$) where the 0.6B's rises ($0.416 \to 0.545$): the encoder trains equally
-well on the bigger backbone; what shrinks is specifically the unseen-entity payoff. Second,
-the axis is not monotone --- the 4B's 10k margin (+8.0\,pt) sits \emph{above} the 1.7B's
-(+6.2\,pt, seed spread $\pm$0.3), a partial recovery consistent with larger models being
-better consumers of injected context, though the teacher-relative curricula (a stronger base
-tiers a different question mix into training) remain a candidate confound.
+only $2.1\times$ --- the 1.7B needs the full $10\times$ step (+13.1\,pt at 100k) to edge past
+what the 0.6B already had at 10k (+10.7\,pt). Headroom does not explain this: base accuracy
+moves only $0.10 \to 0.15$ across the family while the RAG ceiling stays at $\sim$0.97, yet
+relative gap closure at 100k falls from 44\% (0.6B) to 16\% (1.7B). Two further observations
+sharpen the picture. First, the 1.7B's \emph{held-out} accuracy is nearly flat across the
+data step ($0.397 \to 0.418$, +2.1\,pt) where the 0.6B's rises by +12.9\,pt
+($0.416 \to 0.545$): the encoder trains equally well on the bigger backbone; what shrinks is
+specifically the unseen-entity payoff. Second, the axis is not monotone --- the 4B's 10k
+margin (+8.2\,pt, two tightly agreeing seeds) sits \emph{above} the 1.7B's (+6.2\,pt, seed
+spread $\pm$0.3), a partial recovery consistent with larger models being better consumers of
+injected context, though the teacher-relative curricula (a stronger base tiers a different
+question mix into training) remain a candidate confound. One caution: the 1.7B$\times$100k
+cell shows the grid's widest seed spread so far ($0.253$/$0.290$ across two seeds), so its
+exact magnitude --- not the direction of the comparison --- awaits the third seed.
 
 \subsection{Does it read the graph? Causal probes}
 \label{sec:probes}
@@ -527,8 +531,8 @@ implies more data recovers proportionally more of the remaining gap, while a
 \emph{steerability effect} (bigger frozen models need more training signal per unit of
 behavioral change from $k$ soft tokens) implies the data gain itself shrinks with model size.
 The grid's 100k column decides for steerability: headroom is nearly constant across the
-family, yet the $10\times$ data step buys the 1.7B half the relative improvement it buys the
-0.6B (\S\ref{sec:scaling}). The 4B's partial recovery at 10k keeps the axis from being a
+family, yet the $10\times$ data step multiplies the 1.7B's margin $2.1\times$ where the
+0.6B's grows $3.5\times$ (\S\ref{sec:scaling}). The 4B's partial recovery at 10k keeps the axis from being a
 simple decay and makes the missing 4B$\times$100k cell the decisive next measurement: if the
 4B also scales with data better than the 1.7B, the channel's value turns back up exactly
 where deployment would want it.
