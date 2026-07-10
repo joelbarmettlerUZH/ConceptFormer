@@ -202,9 +202,14 @@ knowledge injection). Never quote a pre-M7 number in the paper.
   or `state="finished"`. `scan_history` can also page oddly — sanity-check row counts.
 - **`CUDA_VISIBLE_DEVICES=N` + `--device cuda:N` = crash** (use `--device cuda:0`).
 - **`batch 64` OOMs** on 24 GB.
-- **Host-RAM OOM at 100k-corpus prepare():** ~915k rows peak near the 124 GB box limit; the kernel
-  OOM-kills python silently after ~2h of "preprocessing" (`journalctl -k` shows it; the `|| echo
-  FAILED` chain then "succeeds"). Fixed by storing teacher ctx ids as `array('i')` in `Prepared`;
-  if it recurs, check what else on the box holds RAM before blaming the code.
+- **Host-RAM OOM at 100k-corpus prepare(): pass `--no-cache-teacher`.** The CLI defaults
+  `--cache-teacher` ON; the teacher-hidden cache costs ~path x d_llm x 4 B per row in host RAM
+  (~160 KB/row at d=2048 -> ~130 GB at 800k rows), and the kernel OOM-kills python silently
+  ~2h into "preprocessing" (`journalctl -k` shows it; the `|| echo FAILED` chain then
+  "succeeds", six seeds were lost this way). Every successful 100k run has `cache_teacher:
+  false` in its config, i.e. the flag was passed explicitly — a saved config value can be an
+  explicit flag, not the default; reconstruct launch commands accordingly. cf-train now
+  REFUSES cache-teacher above ~24 GB estimated. (Teacher ctx ids are also stored compactly as
+  `array('i')` since the same incident.)
 - Source must be ASCII (ruff RUF flags en-dash/×/≈); 100-char lines; keep ruff+ty+pytest green.
 - Commit/push **only when asked**; never commit `data/`, checkpoints, or `memory/`.

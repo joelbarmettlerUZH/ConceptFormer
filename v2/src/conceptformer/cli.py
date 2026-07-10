@@ -921,6 +921,17 @@ def cf_train(
         step_fn = trainer.step
         accum_fn = trainer.step_accum
     else:
+        # The teacher-hidden cache costs ~path_len x d_llm x 4 B per row in HOST memory
+        # (~160 KB/row at d=2048): fine at 10k-corpus scale, but at ~800k rows it exceeds the
+        # 124 GB box and the kernel OOM-kills the run 2h into preprocessing, silently. Refuse
+        # rather than warn: every large-corpus run must pass --no-cache-teacher deliberately.
+        if cache_teacher:
+            est_gb = len(train_tuples) * 20 * trainer.bb.d_model * 4 / 1e9
+            if est_gb > 24:
+                raise typer.BadParameter(
+                    f"teacher-hidden cache would need ~{est_gb:.0f} GB host RAM for "
+                    f"{len(train_tuples)} rows; rerun with --no-cache-teacher"
+                )
         rprint("[dim]preprocessing (featurize + tokenize once)…[/dim]")
         train_pool = trainer.prepare(train_tuples)  # hoists CPU work out of the training loop
         step_fn = trainer.step_prepared
