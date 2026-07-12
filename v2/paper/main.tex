@@ -416,6 +416,13 @@ a point on a decay, and the shrunken data gain is specific to it. The teacher-re
 curricula remain a candidate confound throughout, since a stronger base tiers a different
 question mix into its training corpus.
 
+\paragraph{Stability across scale.} The 1.7B's 100k cells expose a second scale effect.
+Doubling the token budget there moves the mean margin from +13.0 to +15.1 points, but the
+seed spreads of the two cells ($\pm$1.9 and $\pm$2.4) exceed that difference, so the token
+step is not resolved at three seeds. The same recipe, selected for stability on the smallest
+backbone, holds every 0.6B cell below $\pm$0.3. Outcome variance grows with backbone scale,
+and at the 1.7B's 100k corner it swamps effects that the smaller backbone resolves clearly.
+
 \subsection{Causal probes of graph reading}
 \label{sec:probes}
 
@@ -565,9 +572,9 @@ English Wikidata. Only entity-valued relations are modeled, so literals such as 
 quantities are absent. Evaluation centers on \popqa{} and on held-out questions from the same
 generator, and the faithfulness probes cover single-fact questions. Cross-graph evaluation is
 zero-shot on one benchmark with one seed per $k$, and transfer with in-domain training is
-untested. The 4B$\times$100k cell of the grid is pending, and the 1.7B$\times$100k cell shows
-the grid's widest seed spread ($\pm$1.9\,pt). Corpora are teacher-relative, so cross-backbone
-comparisons
+untested. The 4B$\times$100k cell of the grid carries one seed so far, and the
+1.7B$\times$100k cells show the grid's widest seed spreads ($\pm$1.9\,pt at $k{=}8$,
+$\pm$2.4\,pt at $k{=}16$). Corpora are teacher-relative, so cross-backbone comparisons
 involve each model's own curriculum. Knowledge is injected for one identified entity mention
 per prompt, multi-entity composition is untested, and neighborhoods are 1-hop.
 

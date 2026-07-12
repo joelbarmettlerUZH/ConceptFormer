@@ -1051,3 +1051,25 @@ the durable artifacts, not the F13/F15 transcriptions, are the source of truth f
    high other-ablation accuracy. Falsifiers: swaps don't change the answer (memory/entangled), or
    ablation degrades uniformly. Run on `pc_k8_best` when a GPU frees. This is the paper's "it reads
    the graph" proof; the swap-to-FALSE design also disentangles concepts from the LLM's own memory.
+
+---
+
+## Finding 18 — Training stability degrades with backbone scale (1.7B x 100k); 4B x 100k recovers the data gain 🟡 (4B: 1 seed)
+
+**Instability (evidence-backed, 6 runs).** At 1.7B x 100k the locked recipe (gate-none,
+eff-batch-32, selected for stability on 0.6B in F8) produces seed spreads an order of
+magnitude above every other grid cell: k8 = 0.253/0.290/0.270 (std 1.9 pt), k16 =
+0.315/0.268/0.292 (std 2.4 pt); held-out at k16 spreads 0.392-0.502 (std 5.5 pt!). All 0.6B
+cells: std <= 0.3 pt. The k8->k16 token step at this corner (+2.0 pt on means) is INSIDE the
+noise (per-seed deltas +6.2/-2.2/+2.2) — do not claim a 1.7B token-axis effect. F8 one scale
+up: stability is recipe x scale, not recipe alone.
+
+**4B x 100k s0 (single seed — hypothesis tier until s1/s2).** PopQA 0.424 [.416,.432], margin
++27.0 pt, data gain 3.3x (vs 0.6B 3.5x, 1.7B 2.1x). Model axis at 100k: 0.6B +37.4 > 4B
++27.0 > 1.7B +13.0 — the 1.7B is a VALLEY on both margin level and data slope, refuting a
+monotone anti-scaling reading (and weakening the pure steerability verdict; discussion
+rewrite deferred until 3 seeds). Trained locally with --no-cache-teacher (see CLAUDE.md
+pitfall), ~50h/seed. s1 (GPU0) + s2 (GPU1) training in parallel, ETA 2026-07-14.
+
+**Re-verify:** eval_final/q3b17_100k_k16_s{0,1,2}_best, q3b4_100k_k8_s0_best; W&B groups
+v15-scaling-17b, v15-scaling-4b; mirrored to HF results/eval_final.
