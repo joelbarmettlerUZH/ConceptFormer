@@ -390,7 +390,7 @@ partially substitutes for training data.
     \midrule
     Qwen3-0.6B & .103 & $.210{\pm}.012$ (+10.7) & $.477{\pm}.002$ (+37.4) & $3.5\times$ (margin) & 6 / 3\\
     Qwen3-1.7B & .141 & $.203{\pm}.003$ (+6.2) & $.271{\pm}.019$ (+13.0) & $2.1\times$ (margin) & 3 / 3\\
-    Qwen3-4B & .154 & $.237{\pm}.002$ (+8.2) & pending & --- & 3 / ---\\
+    Qwen3-4B & .154 & $.237{\pm}.002$ (+8.2) & $.424$ (+27.0) & $3.3\times$ (margin) & 3 / 1\\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -409,9 +409,12 @@ Two observations sharpen the picture. The 1.7B held-out accuracy barely moves ac
 step ($0.397 \to 0.418$) where the 0.6B gains 13 points. The encoder trains equally well on
 the bigger backbone, and what shrinks is specifically the payoff on unseen entities. And the
 axis is not monotone: the 4B margin at 10k (+8.2\,pt, three seeds within 0.5\,pt) lies above
-the 1.7B margin (+6.2\,pt), which would be consistent with larger models using injected
-context better. The teacher-relative curricula remain a candidate confound here, since a
-stronger base tiers a different question mix into its training corpus.
+the 1.7B margin (+6.2\,pt), and the first 4B$\times$100k seed (+27.0\,pt) multiplies the 4B
+margin $3.3\times$ across the data step, close to the 0.6B's $3.5\times$ and far above the
+1.7B's $2.1\times$. On this first seed, the 1.7B is the valley of the model axis rather than
+a point on a decay, and the shrunken data gain is specific to it. The teacher-relative
+curricula remain a candidate confound throughout, since a stronger base tiers a different
+question mix into its training corpus.
 
 \subsection{Causal probes of graph reading}
 \label{sec:probes}
