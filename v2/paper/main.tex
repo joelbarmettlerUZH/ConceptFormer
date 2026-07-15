@@ -55,8 +55,9 @@
   is distilled toward the same frozen model reading the facts as text. On \popqa{}, eight
   concept tokens lift a frozen Qwen3-0.6B from 0.10 to 0.48 exact match on unseen entities,
   an accuracy that text-based baselines only reach with 64 to 128 fact tokens. Accuracy grows
-  with token budget and with training data, but larger frozen backbones gain less from
-  injection, and more training data does not close this gap. Counterfactual probes confirm
+  with token budget and with training data. Larger frozen backbones gain less from injection,
+  the shortfall is not monotone in model size, and run-to-run variance grows with the
+  backbone. Counterfactual probes confirm
   that answers follow the injected graph, and the encoder transfers zero-shot to MetaQA,
   raising accuracy from 0.06 to 0.34 on a knowledge graph it never saw in training. All
   corpora, checkpoints, and per-item evaluation outputs are released.
@@ -390,7 +391,7 @@ partially substitutes for training data.
     \midrule
     Qwen3-0.6B & .103 & $.210{\pm}.012$ (+10.7) & $.477{\pm}.002$ (+37.4) & $3.5\times$ (margin) & 6 / 3\\
     Qwen3-1.7B & .141 & $.203{\pm}.003$ (+6.2) & $.271{\pm}.019$ (+13.0) & $2.1\times$ (margin) & 3 / 3\\
-    Qwen3-4B & .154 & $.237{\pm}.002$ (+8.2) & $.424$ (+27.0) & $3.3\times$ (margin) & 3 / 1\\
+    Qwen3-4B & .154 & $.237{\pm}.002$ (+8.2) & $.380{\pm}.042$ (+22.5) & $2.7\times$ (margin) & 3 / 3\\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -403,25 +404,25 @@ It gains less, and data does not close the gap. The 1.7B margin is roughly half 
 margin at both corpus scales. The same $10\times$ data step multiplies the 0.6B margin
 $3.5\times$ and the 1.7B margin $2.1\times$. Headroom does not explain this: base accuracy
 moves only from 0.10 to 0.15 across the family and the RAG ceiling stays near 0.97, yet at
-100k entities the 0.6B closes 44\% of its base-to-RAG gap and the 1.7B closes 16\%.
+100k entities the 0.6B closes 44\% of its base-to-RAG gap, the 4B closes 28\%, and the 1.7B
+closes 16\%.
 
 Two observations sharpen the picture. The 1.7B held-out accuracy barely moves across the data
 step ($0.397 \to 0.418$) where the 0.6B gains 13 points. The encoder trains equally well on
 the bigger backbone, and what shrinks is specifically the payoff on unseen entities. And the
-axis is not monotone: the 4B margin at 10k (+8.2\,pt, three seeds within 0.5\,pt) lies above
-the 1.7B margin (+6.2\,pt), and the first 4B$\times$100k seed (+27.0\,pt) multiplies the 4B
-margin $3.3\times$ across the data step, close to the 0.6B's $3.5\times$ and far above the
-1.7B's $2.1\times$. On this first seed, the 1.7B is the valley of the model axis rather than
-a point on a decay, and the shrunken data gain is specific to it. The teacher-relative
-curricula remain a candidate confound throughout, since a stronger base tiers a different
-question mix into its training corpus.
+axis is not monotone: the 4B margin exceeds the 1.7B margin at both corpus scales (+8.2 vs.\
++6.2 at 10k, +22.5 vs.\ +13.0 at 100k), and its data gain of $2.7\times$ sits between the
+0.6B's $3.5\times$ and the 1.7B's $2.1\times$. The 1.7B is a valley of the model axis rather
+than a point on a decay. The teacher-relative curricula remain a candidate confound
+throughout, since a stronger base tiers a different question mix into its training corpus.
 
-\paragraph{Stability across scale.} The 1.7B's 100k cells expose a second scale effect.
-Doubling the token budget there moves the mean margin from +13.0 to +15.1 points, but the
-seed spreads of the two cells ($\pm$1.9 and $\pm$2.4) exceed that difference, so the token
-step is not resolved at three seeds. The same recipe, selected for stability on the smallest
-backbone, holds every 0.6B cell below $\pm$0.3. Outcome variance grows with backbone scale,
-and at the 1.7B's 100k corner it swamps effects that the smaller backbone resolves clearly.
+\paragraph{Stability across scale.} Outcome variance grows monotonically with backbone size.
+The recipe, selected for stability on the smallest backbone, holds every 0.6B cell within
+$\pm$0.3 points. At 1.7B$\times$100k the seed spreads are $\pm$1.9 ($k{=}8$) and $\pm$2.4
+($k{=}16$), and at 4B$\times$100k the spread reaches $\pm$4.2. This noise swamps effects that
+the 0.6B resolves cleanly: doubling the 1.7B's token budget at 100k moves the mean margin
+from +13.0 to +15.1, less than the seed spread of either cell. Stabilizing the recipe per
+scale is a prerequisite to measuring such effects on larger backbones.
 
 \subsection{Causal probes of graph reading}
 \label{sec:probes}
@@ -562,19 +563,24 @@ supports the second reading: soft prompts can bias a frozen model's attention ou
 cannot create new attention patterns, so they elicit rather than teach \citep{petrov}.
 Empirically, prompt-tuning gains track base-model scale in fine-tuning scaling laws
 \citep{scalingft}, and the marginal utility of retrieval also depends on model scale and
-pretraining saturation \citep{memorizeretrieve}. Our grid supports steerability: headroom is
-nearly constant across the family, yet the data gain shrinks (\S\ref{sec:scaling}). The 4B result at 10k complicates the picture, since the axis
-does not decay monotonically. The 4B$\times$100k cell would separate the two effects and is
-left to future work.
+pretraining saturation \citep{memorizeretrieve}. The completed grid rejects both readings as
+monotone accounts. Headroom is nearly constant across the family, which rules out a pure
+ceiling effect, but the data gain does not decay monotonically either: it falls from
+$3.5\times$ at 0.6B to $2.1\times$ at 1.7B and recovers to $2.7\times$ at 4B
+(\S\ref{sec:scaling}). What does change monotonically is stability, with seed spreads of
+$\pm$0.2, $\pm$1.9, and $\pm$4.2 points across the three scales. We read the grid as evidence
+that the binding constraint on scaling up injection is training stability rather than
+headroom, with the 1.7B valley as the sharpest open question. Per-scale recipe tuning is the
+experiment that would decide it.
 
 \paragraph{Limitations.} Training uses a single knowledge graph and a single language,
 English Wikidata. Only entity-valued relations are modeled, so literals such as dates and
 quantities are absent. Evaluation centers on \popqa{} and on held-out questions from the same
 generator, and the faithfulness probes cover single-fact questions. Cross-graph evaluation is
 zero-shot on one benchmark with one seed per $k$, and transfer with in-domain training is
-untested. The 4B$\times$100k cell of the grid carries one seed so far, and the
-1.7B$\times$100k cells show the grid's widest seed spreads ($\pm$1.9\,pt at $k{=}8$,
-$\pm$2.4\,pt at $k{=}16$). Corpora are teacher-relative, so cross-backbone comparisons
+untested. The 100k cells of the two larger backbones carry wide seed spreads ($\pm$1.9 to
+$\pm$4.2 points), so their magnitudes are less settled than the 0.6B results. Corpora are
+teacher-relative, so cross-backbone comparisons
 involve each model's own curriculum. Knowledge is injected for one identified entity mention
 per prompt, multi-entity composition is untested, and neighborhoods are 1-hop.
 
@@ -592,9 +598,9 @@ A frozen, instruction-tuned language model can be grounded in a knowledge graph 
 handful of learned continuous tokens. Eight tokens more than quadruple accuracy on unseen
 entities at a fraction of retrieval's context cost, causal probes show that the model reads
 the injected graph, and the encoder transfers zero-shot to a graph it was never trained on.
-The injected margin shrinks as the frozen model grows and more data does not close that gap,
-which makes the interaction of model scale and injection the central open question. All
-corpora, checkpoints, and per-item evaluation outputs are released.
+The injected margin shrinks as the frozen model grows, non-monotonically and with rising
+run-to-run variance, which makes the interaction of model scale and injection the central
+open question. All corpora, checkpoints, and per-item evaluation outputs are released.
 
 \begin{ack}
 Drafted with substantial tooling assistance from Claude (Anthropic) for literature search,

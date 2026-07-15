@@ -1073,3 +1073,11 @@ pitfall), ~50h/seed. s1 (GPU0) + s2 (GPU1) training in parallel, ETA 2026-07-14.
 
 **Re-verify:** eval_final/q3b17_100k_k16_s{0,1,2}_best, q3b4_100k_k8_s0_best; W&B groups
 v15-scaling-17b, v15-scaling-4b; mirrored to HF results/eval_final.
+
+**F18 FINAL (2026-07-15, grid complete, all cells 3 seeds).** 4B x 100k x k8:
+0.424/0.342/0.373 -> 0.380 +/- 0.042, margin +22.5 +/- 4.2, data gain 2.7x. Model axis at
+100k: 0.6B +37.4 > 4B +22.5 > 1.7B +13.0 (valley CONFIRMED, 4B > 1.7B by 9.5 pt >> noise);
+gap closure 44% / 28% / 16%. Variance is MONOTONE in backbone scale: sigma = 0.2 / 1.9 / 4.2.
+Discussion verdict rewritten: both ceiling and steerability rejected as monotone accounts;
+binding constraint = training stability; per-scale recipe tuning = the deciding experiment
+(grant WP). Upgrade F18 to evidence-backed.
