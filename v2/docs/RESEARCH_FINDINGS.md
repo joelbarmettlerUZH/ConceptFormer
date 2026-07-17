@@ -1081,3 +1081,25 @@ gap closure 44% / 28% / 16%. Variance is MONOTONE in backbone scale: sigma = 0.2
 Discussion verdict rewritten: both ceiling and steerability rejected as monotone accounts;
 binding constraint = training stability; per-scale recipe tuning = the deciding experiment
 (grant WP). Upgrade F18 to evidence-backed.
+
+---
+
+## Finding 19 — Gemma-3 family transect at 10k: the small-to-mid margin collapse replicates, the 4B uptick does not ✅ (3 seeds/cell)
+
+**Setup.** Same protocol as the Qwen grid: teacher-relative 10k corpora (tier + teacher paths
+per model on the shared qa.jsonl), k8, locked recipe, 72k steps, eval-final. Datasets
+cftrain_qa_10k_gemma3-{270m,1b,4b}; checkpoints gemma3-*_10k_k8_s{0..2}; W&B group
+family-gemma3-10k. Pipeline notes: gemma-3-4b-it is multimodal (text_config routing works,
+standard RoPE); Gemma template folds system into user turn (sentinel split unaffected);
+262k vocab (KL fine at eval-gen-batch 8-16).
+
+**Numbers (PopQA, 3 seeds).** 270m: .185+/-.008, base .039, margin +14.7+/-0.8 | 1b:
+.191+/-.007, base .112, margin +7.9+/-0.7 | 4b: .241+/-.008, base .167, margin +7.4+/-0.8.
+
+**Read.** Cross-family replication at 10k: margin roughly HALVES smallest->mid in both
+families (Gemma 14.7->7.9; Qwen 10.7->6.2); smallest backbone posts the largest margin in
+either family. NOT replicated: Qwen's 4B uptick (+6.2->+8.2, outside noise) -- Gemma 4b
+(+7.4) is flat vs 1b (within noise). At 10k the family-general shape is steep-decline-then-
+flatten. The decisive test (valley + variance at 100k) is Stage B: Gemma 100k corpora
+pending user decision (~330 GPUh local / pod). Seed spreads tight (<=0.8) at 10k in both
+families, consistent with instability being corpus-scale-driven (F18).

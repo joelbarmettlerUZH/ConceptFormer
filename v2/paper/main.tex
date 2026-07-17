@@ -57,7 +57,8 @@
   an accuracy that text-based baselines only reach with 64 to 128 fact tokens. Accuracy grows
   with token budget and with training data. Larger frozen backbones gain less from injection,
   the shortfall is not monotone in model size, and run-to-run variance grows with the
-  backbone. Counterfactual probes confirm
+  backbone. The declining margin replicates in a second model family. Counterfactual probes
+  confirm
   that answers follow the injected graph, and the encoder transfers zero-shot to MetaQA,
   raising accuracy from 0.06 to 0.34 on a knowledge graph it never saw in training. All
   corpora, checkpoints, and per-item evaluation outputs are released.
@@ -392,6 +393,10 @@ partially substitutes for training data.
     Qwen3-0.6B & .103 & $.210{\pm}.012$ (+10.7) & $.477{\pm}.002$ (+37.4) & $3.5\times$ (margin) & 6 / 3\\
     Qwen3-1.7B & .141 & $.203{\pm}.003$ (+6.2) & $.271{\pm}.019$ (+13.0) & $2.1\times$ (margin) & 3 / 3\\
     Qwen3-4B & .154 & $.237{\pm}.002$ (+8.2) & $.380{\pm}.042$ (+22.5) & $2.7\times$ (margin) & 3 / 3\\
+    \midrule
+    Gemma-3-270m & .039 & $.185{\pm}.008$ (+14.7) & --- & --- & 3 / ---\\
+    Gemma-3-1b & .112 & $.191{\pm}.007$ (+7.9) & --- & --- & 3 / ---\\
+    Gemma-3-4b & .167 & $.241{\pm}.008$ (+7.4) & --- & --- & 3 / ---\\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -415,6 +420,14 @@ axis is not monotone: the 4B margin exceeds the 1.7B margin at both corpus scale
 0.6B's $3.5\times$ and the 1.7B's $2.1\times$. The 1.7B is a valley of the model axis rather
 than a point on a decay. The teacher-relative curricula remain a candidate confound
 throughout, since a stronger base tiers a different question mix into its training corpus.
+
+A second model family tests how much of this is Qwen-specific. Across Gemma-3 backbones at
+10k entities (Table~\ref{tab:grid}), the margin again roughly halves from the smallest model
+(+14.7) to the mid-size one (+7.9), and the smallest backbone in either family posts the
+largest margin. The 4B step differs: Gemma's 4b (+7.4) sits within noise of its 1b, where
+Qwen's 4B rose. At this corpus scale, the steep small-to-mid decline is family-general and
+the recovery is not. Whether Gemma's flat tail also splits apart under $10\times$ data, as
+Qwen's did, is the natural next measurement.
 
 \paragraph{Stability across scale.} Outcome variance grows monotonically with backbone size.
 The recipe, selected for stability on the smallest backbone, holds every 0.6B cell within

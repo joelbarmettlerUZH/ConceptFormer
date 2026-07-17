@@ -96,12 +96,16 @@ GRID = {  # backbone -> corpus -> checkpoint names (k=8, before_entity)
         "10k": [f"q3b4_10k_k8_s{s}_best" for s in range(3)],
         "100k": [f"q3b4_100k_k8_s{s}_best" for s in range(3)],
     },
+    "Gemma-3-270m": {"10k": [f"gemma3-270m_10k_k8_s{s}_best" for s in range(3)]},
+    "Gemma-3-1b": {"10k": [f"gemma3-1b_10k_k8_s{s}_best" for s in range(3)]},
+    "Gemma-3-4b": {"10k": [f"gemma3-4b_10k_k8_s{s}_best" for s in range(3)]},
 }
 fig2, ax = plt.subplots(figsize=(6.2, 4.2))
 X = {"10k": 10_000, "100k": 100_000}
 for (backbone, cells), color, marker in zip(
-    GRID.items(), [BLUE, GREEN, ORANGE], "osD", strict=True
+    GRID.items(), [BLUE, GREEN, ORANGE, BLUE, GREEN, ORANGE], "osDosD", strict=True
 ):
+    dashed = backbone.startswith("Gemma")
     xs, ys, errs = [], [], []
     for corpus, names in cells.items():
         c = acc(names, "popqa")
@@ -111,8 +115,8 @@ for (backbone, cells), color, marker in zip(
             ys.append(100 * (c[0] - b[0]))
             errs.append(100 * c[1])
     if xs:
-        ax.errorbar(xs, ys, yerr=errs, fmt=f"{marker}-", color=color, capsize=3,
-                    label=backbone)
+        ax.errorbar(xs, ys, yerr=errs, fmt=f"{marker}{'--' if dashed else '-'}", color=color,
+                    capsize=3, markerfacecolor="none" if dashed else color, label=backbone)
 ax.set_xscale("log")
 ax.set_xticks(list(X.values()), list(X.keys()))
 ax.set_xlabel("training entities")
