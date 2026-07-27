@@ -1128,3 +1128,11 @@ Qwen-specific and is retired.
 **Re-verify:** eval_final/gemma3-{270m,1b,4b}_100k_k8_s{0,1,2}_best; W&B group
 family-gemma3-100k; mirrored to HF results/eval_final. Ops: Gemma 262k vocab needs HALF the
 Qwen batch at equal size (4b tier OOMed at batch 32, fine at 16; teacher paths 16->8).
+
+**F17 addendum (2026-07-27): k2/k4 MetaQA cells filled.** k2 .162 [.155,.169] (McNemar vs
+base +1136/-96, p~3e-226), k4 .240 [.232,.249] (+1880/-62, p<1e-300). Transfer curve is a
+STAIRCASE, not a scaled home curve: k2 adds nothing over k1 zero-shot (12.1% vs 12.0%
+closure while home doubles), k4 jumps to a ~21% plateau holding through k16, k32 jumps to
+32%. "Roughly half the home closure at every k>1" survives (45-63%); "monotone/same-shape"
+retired (k4 .240 > k8 .235, within noise -> plateau). Paper S5.4 + Fig 6 title/caption
+updated accordingly.

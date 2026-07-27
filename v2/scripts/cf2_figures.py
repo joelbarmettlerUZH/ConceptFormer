@@ -242,8 +242,8 @@ ax.set_xscale("log", base=2)
 ax.set_xticks(KS, [str(k) for k in KS])
 ax.set_xlabel("concept tokens $k$")
 ax.set_ylabel("base$\\rightarrow$RAG gap closed (%)")
-ax.set_title("Same encoder, two graphs: transfer keeps the shape\nof the $k$-curve at "
-             "roughly half the effect", fontsize=10)
+ax.set_title("Same encoder, two graphs: transfer retains roughly half\nthe gap closure, "
+             "rising in steps rather than smoothly", fontsize=10)
 ax.grid(True, alpha=0.25)
 ax.legend(fontsize=9, loc="upper left")
 fig4.tight_layout()

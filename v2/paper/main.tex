@@ -501,6 +501,8 @@ accuracy of the $k{=}8$ model varies with a standard deviation of at most 1.1\,p
     \midrule
     base (floor) & .058\\
     $k{=}1$ & .161\\
+    $k{=}2$ & .162\\
+    $k{=}4$ & .240\\
     $k{=}8$ & .235\\
     $k{=}16$ & .244\\
     $k{=}32$ & \textbf{.335}\\
@@ -513,8 +515,9 @@ accuracy of the $k{=}8$ model varies with a standard deviation of at most 1.1\,p
   \centering
   \includegraphics[width=0.6\linewidth]{figures/fig_transfer.png}
   \caption{Share of the base-to-RAG gap closed, on the home graph (Wikidata/\popqa{}, 3
-  seeds) and zero-shot on MetaQA (one seed, Wilson CIs). The transferred curve keeps the
-  shape of the home curve at roughly half the effect.}
+  seeds) and zero-shot on MetaQA (one seed, Wilson CIs). Transfer retains roughly half of
+  the home-graph gap closure at every $k$ above 1, but rises in steps rather than
+  smoothly.}
   \label{fig:transfer}
 \end{figure}
 
@@ -536,14 +539,18 @@ checkpoints unchanged.
 
 Injection transfers. At $k{=}32$, the concept tokens reach 0.335 accuracy on a graph the
 encoder has never seen, against a base of 0.058 (Table~\ref{tab:transfer}). Every $k$ beats
-the base under an item-paired McNemar test ($p < 10^{-10}$), and the curve stays monotone in
-$k$. Figure~\ref{fig:transfer} compares the two graphs on a common scale, as the share of the
-base-to-RAG gap that the concept tokens close. Zero-shot transfer retains roughly half of the
-home-graph effect at every $k$ above 1, and at $k{=}1$ the two curves coincide. The high RAG
-reference (0.921) shows that the frozen model can answer in this domain when given text, so
-the remaining gap belongs to the transferred encoder. Together with the probes of
-\S\ref{sec:probes}, transfer supports the inductive claim: the encoder learned a mapping from
-labeled edges to concept tokens that generalizes beyond its training graph.
+the base under an item-paired McNemar test ($p < 10^{-10}$). Figure~\ref{fig:transfer}
+compares the two graphs on a common scale, as the share of the base-to-RAG gap that the
+concept tokens close. Zero-shot transfer retains roughly half of the home-graph gap closure
+at every $k$ above 1, and at $k{=}1$ the two curves coincide. The shape differs, though:
+where the home curve rises smoothly, the transferred curve rises in steps. The second token
+adds nothing zero-shot, accuracy plateaus from $k{=}4$ through $k{=}16$, and the next gain
+arrives only at $k{=}32$. Some of each capacity increment appears to carry
+Wikidata-specific refinement that does not survive the graph swap. The high RAG reference
+(0.921) shows that the frozen model can answer in this domain when given text, so the
+remaining gap belongs to the transferred encoder. Together with the probes of
+\S\ref{sec:probes}, transfer supports the inductive claim: the encoder learned a mapping
+from labeled edges to concept tokens that generalizes beyond its training graph.
 
 \subsection{Ablations}
 
