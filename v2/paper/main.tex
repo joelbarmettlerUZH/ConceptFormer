@@ -100,7 +100,8 @@ behaves identically to the frozen model.
 with generative exact match on \popqa{} against strong text baselines and an
 untrained-injection control (\S\ref{sec:efficiency}).
 \textbf{(2)}~Matched scaling measurements along three axes: token budget, training-corpus
-size, and frozen-model size, showing how the three trade against each other
+size, and frozen-model size, repeated across two model families (Qwen3 and Gemma-3), showing
+how the three trade against each other and which patterns are family-general
 (\S\ref{sec:scaling}).
 \textbf{(3)}~Causal probes showing that answers follow the injected graph, and zero-shot
 transfer of the trained encoder to an unseen knowledge graph (\S\ref{sec:probes},
@@ -266,7 +267,9 @@ base-known questions is retained). Finally, we store the teacher's greedy answer
 corpora hold 10k entities ($92{,}177$ rows under the Qwen3-0.6B \citep{qwen} teacher) and
 100k entities ($925{,}178$ rows). Tiering and teacher paths depend on the backbone, so each
 backbone trains on its own corpus variant of near-identical size, and cross-backbone
-comparisons evaluate each model with its own curriculum.
+comparisons evaluate each model with its own curriculum. The same pipeline, applied
+unchanged, produces the corpora for the six backbones of the two model families we study
+(Qwen3 0.6B/1.7B/4B and Gemma-3 270m/1b/4b \citep{gemma3}).
 
 \paragraph{Training.} AdamW with constant learning rate $10^{-4}$, weight decay $0.01$, and
 effective batch size 32 through gradient accumulation. We train 72k optimizer steps on the
@@ -723,6 +726,10 @@ funding.
   S.~Y.~Feng.
 \newblock To memorize or to retrieve: Scaling laws for RAG-considerate pretraining.
 \newblock arXiv:2604.00715, 2026.
+
+\bibitem{gemma3} Gemma Team, Google DeepMind.
+\newblock Gemma 3 technical report.
+\newblock arXiv:2503.19786, 2025.
 
 \bibitem{ptuningv2} X.~Liu, K.~Ji, Y.~Fu, W.~L.~Tam, Z.~Du, Z.~Yang, and J.~Tang.
 \newblock P-Tuning v2: Prompt tuning can be comparable to fine-tuning universally across
