@@ -96,9 +96,18 @@ GRID = {  # backbone -> corpus -> checkpoint names (k=8, before_entity)
         "10k": [f"q3b4_10k_k8_s{s}_best" for s in range(3)],
         "100k": [f"q3b4_100k_k8_s{s}_best" for s in range(3)],
     },
-    "Gemma-3-270m": {"10k": [f"gemma3-270m_10k_k8_s{s}_best" for s in range(3)]},
-    "Gemma-3-1b": {"10k": [f"gemma3-1b_10k_k8_s{s}_best" for s in range(3)]},
-    "Gemma-3-4b": {"10k": [f"gemma3-4b_10k_k8_s{s}_best" for s in range(3)]},
+    "Gemma-3-270m": {
+        "10k": [f"gemma3-270m_10k_k8_s{s}_best" for s in range(3)],
+        "100k": [f"gemma3-270m_100k_k8_s{s}_best" for s in range(3)],
+    },
+    "Gemma-3-1b": {
+        "10k": [f"gemma3-1b_10k_k8_s{s}_best" for s in range(3)],
+        "100k": [f"gemma3-1b_100k_k8_s{s}_best" for s in range(3)],
+    },
+    "Gemma-3-4b": {
+        "10k": [f"gemma3-4b_10k_k8_s{s}_best" for s in range(3)],
+        "100k": [f"gemma3-4b_100k_k8_s{s}_best" for s in range(3)],
+    },
 }
 fig2, ax = plt.subplots(figsize=(6.2, 4.2))
 X = {"10k": 10_000, "100k": 100_000}
