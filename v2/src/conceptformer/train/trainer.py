@@ -35,6 +35,7 @@ from conceptformer.model.featurizer import (
     SubgraphFeatures,
     collate_features,
     featurize_subgraph,
+    featurize_subgraph_recursive,
 )
 from conceptformer.model.injection import ConceptGate, build_position_ids, pack_embeddings
 from conceptformer.model.vision_port import (
@@ -701,19 +702,48 @@ class ConceptTrainer:
         return [t.strip() for t in self.bb.tokenizer.batch_decode(new, skip_special_tokens=True)]
 
     @torch.no_grad()
+    @torch.no_grad()
+    def precompute_pooled_concepts(
+        self, subgraphs: Sequence[Subgraph], batch_size: int = 64
+    ) -> dict[str, Tensor]:
+        """{qid: mean-pooled concept vector ``(d,)``} for every subgraph -- the 2-hop probe table.
+
+        Encodes each entity's 1-hop neighborhood once and averages the ``k`` concept tokens into a
+        single ``d`` vector, so it can slot into a neighbor feature slot (see
+        ``featurize_subgraph_recursive``). Kept on the model device/dtype for a cheap cat later.
+        """
+        self.model.eval()
+        items = list(subgraphs)
+        table: dict[str, Tensor] = {}
+        for i in range(0, len(items), batch_size):
+            chunk = items[i : i + batch_size]
+            feats = [featurize_subgraph(sg, self.bb.embed_labels) for sg in chunk]
+            pooled = self._encode_concepts(feats).mean(dim=1)  # (B, d)
+            for sg, vec in zip(chunk, pooled, strict=True):
+                table[sg.center.qid] = vec
+        return table
+
     def generate_student_batch(
-        self, items: list[tuple[Subgraph, str]], max_new: int, system: str = TEACHER_SYSTEM
+        self, items: list[tuple[Subgraph, str]], max_new: int, system: str = TEACHER_SYSTEM,
+        neighbor_concepts: dict[str, Tensor] | None = None,
     ) -> list[str]:
         """Batched greedy generation with concept tokens spliced in (left-padded), under ``system``.
 
         ``system`` may be a prompt the model never trained under — that is the decoupling test.
+        If ``neighbor_concepts`` is given, each edge's neighbor is featurized by its pooled concept
+        vector instead of its label (the recursive 2-hop probe).
         """
         if not items:
             return []
         self.model.eval()
-        concepts = self._encode_concepts(
-            [featurize_subgraph(sg, self.bb.embed_labels) for sg, _ in items]
-        )
+        if neighbor_concepts is None:
+            feats = [featurize_subgraph(sg, self.bb.embed_labels) for sg, _ in items]
+        else:
+            feats = [
+                featurize_subgraph_recursive(sg, self.bb.embed_labels, neighbor_concepts)
+                for sg, _ in items
+            ]
+        concepts = self._encode_concepts(feats)
         seqs, ids_rows = [], []
         for i, (sg, question) in enumerate(items):
             label = sg.center.label or sg.center.qid

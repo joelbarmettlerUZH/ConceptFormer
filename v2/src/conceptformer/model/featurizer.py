@@ -67,6 +67,41 @@ def featurize_subgraph(sg: Subgraph, embedder: LabelEmbedder) -> SubgraphFeature
     return SubgraphFeatures(edge_features=edge_features, center=center)
 
 
+def featurize_subgraph_recursive(
+    sg: Subgraph, embedder: LabelEmbedder, concept_lookup: dict[str, Tensor]
+) -> SubgraphFeatures:
+    """Like ``featurize_subgraph``, but the neighbor half of each edge is the neighbor's own
+    (pooled) concept vector instead of its label embedding.
+
+    This encodes one extra hop *without* flattening: the neighbor's compressed neighborhood stays
+    bound to the specific edge, so a 2-hop fact (X --r--> N, N --s--> Z) is represented as
+    ``[embed(r); pool(C(N))]`` with Z reachable through ``C(N)`` rather than dumped into X's edge
+    bag. Neighbors absent from ``concept_lookup`` (e.g. leaves) fall back to the label embedding,
+    so the feature space stays consistent. The relation half and the center are unchanged, so the
+    input dimension is still ``2d`` and the encoder needs no resize.
+    """
+    pairs = edge_label_pairs(sg)
+    if not pairs:
+        raise ValueError(f"subgraph {sg.center.qid} has no edges to featurize")
+    props = embedder([p for p, _ in pairs])  # (N, d)
+    neighbor_vecs: list[Tensor | None] = []
+    missing_idx, missing_labels = [], []
+    for i, (_, neighbor_label) in enumerate(pairs):
+        vec = concept_lookup.get(sg.edges[i].neighbor.qid)
+        neighbor_vecs.append(vec.to(props.dtype) if vec is not None else None)
+        if vec is None:
+            missing_idx.append(i)
+            missing_labels.append(neighbor_label)
+    if missing_labels:  # one batched embed for all label fallbacks
+        filled = embedder(missing_labels)
+        for j, i in enumerate(missing_idx):
+            neighbor_vecs[i] = filled[j]
+    neighbors = torch.stack([v for v in neighbor_vecs if v is not None])  # (N, d)
+    edge_features = torch.cat([props, neighbors], dim=-1)  # (N, 2d)
+    center = embedder([sg.center.label or sg.center.qid])[0]
+    return SubgraphFeatures(edge_features=edge_features, center=center)
+
+
 def collate_features(
     items: Sequence[SubgraphFeatures],
 ) -> tuple[Tensor, Tensor, Tensor]:

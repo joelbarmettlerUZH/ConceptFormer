@@ -1531,6 +1531,9 @@ def eval_transfer(
     snapshot: Annotated[str, typer.Option()] = "metaqa",
     benchmark: Annotated[str, typer.Option(help="benchmark tag for the report")] = "metaqa_1hop",
     source: Annotated[str, typer.Option(help="QA loader: metaqa | worldcup")] = "metaqa",
+    neighbor_features: Annotated[
+        str, typer.Option(help="edge neighbor half: label | concept (recursive 2-hop probe)")
+    ] = "label",
     n: Annotated[int, typer.Option(help="questions to score (0 = all)")] = 2000,
     gen_batch: Annotated[int, typer.Option()] = 32,
     max_new: Annotated[int, typer.Option()] = 32,
@@ -1567,11 +1570,21 @@ def eval_transfer(
     rprint(f"[bold]zero-shot transfer[/] {checkpoint} -> {benchmark}: n={len(items)} "
            f"(of {len(examples)} questions, {len(sgs)} entities in graph)")
 
+    # Recursive 2-hop probe: represent each edge's neighbor by its own pooled concept vector
+    # rather than its label embedding, so one extra hop is encoded with the join preserved.
+    nbr_concepts = None
+    if neighbor_features == "concept":
+        rprint(f"[dim]precomputing pooled concept vectors for {len(sgs)} entities…[/dim]")
+        nbr_concepts = trainer.precompute_pooled_concepts(sgs.values())
+    elif neighbor_features != "label":
+        raise typer.BadParameter("neighbor-features must be 'label' or 'concept'")
+
     concept_preds: list[str] = []
     for i in range(0, len(items), gen_batch):
         chunk = items[i : i + gen_batch]
         concept_preds += trainer.generate_student_batch(
-            [(sg, q) for sg, q, _, _ in chunk], max_new, TEACHER_SYSTEM
+            [(sg, q) for sg, q, _, _ in chunk], max_new, TEACHER_SYSTEM,
+            neighbor_concepts=nbr_concepts,
         )
     base_preds = chat.generate_batch(
         [(TEACHER_SYSTEM, q) for _, q, _, _ in items],
@@ -1601,6 +1614,7 @@ def eval_transfer(
         )
     report = {
         "checkpoint": checkpoint, "benchmark": benchmark, "snapshot": snapshot,
+        "neighbor_features": neighbor_features,
         "eval_sample_seed": EVAL_SAMPLE_SEED, "config": blob["config"],
         "n": len(per_item),
         "concept": summarize_accuracy(concept_flags),
