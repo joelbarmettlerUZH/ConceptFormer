@@ -1205,3 +1205,14 @@ answers), so answer_ok is easier; levels are NOT on a comparable scale. Still gr
 steps). Script scripts/recursive_hop.py (--init-encoder / --neighbor-table / --save-table chain);
 artifacts data/recursive/{e2,e3,c2}.pt (git-ignored). Proper version = Wikidata 2-hop corpus +
 label-free KL + shared-weight recursion (grant work package, not this paper).
+
+**F22 UPDATE 2 (2026-07-27): fine-tune on MetaQA 1-hop FIRST (domain adaptation before multi-hop).**
+Prior recursive runs paid the Wikidata->MetaQA gap twice (neighbor concepts from Wikidata pc_k1
+zero-shot + Wikidata pc_k32 init). Fixed by fine-tuning on MetaQA 1-hop first (CE, 4k steps):
+k=1 -> 0.248 (produces domain-adapted C1 neighbor table); k=32 -> 0.648 (in-domain 1-hop MetaQA,
+vs 0.335 zero-shot transfer). Then adapted 2-hop (init from k32_metaqa, C1_metaqa neighbors) =
+0.199 (vs 0.185 Wikidata-init, +1.4pt); adapted 3-hop (from adapted 2-hop, C2 neighbors) = 0.394
+(vs 0.343, +5.1pt). Fine-tune-first helps, most at 3-hop. Adapted ladder (k=32): 1-hop 0.648 ->
+2-hop 0.199 -> 3-hop 0.394; 3-hop>2-hop still the MetaQA aggregation artifact, not a real ladder.
+Artifacts data/recursive/{k1_metaqa,k32_metaqa,e2m,e3m,c1_metaqa,c2m}.pt. Grant-preliminary
+(CE, k=1 neighbor bottleneck, 10k, overfits past ~3k steps).
