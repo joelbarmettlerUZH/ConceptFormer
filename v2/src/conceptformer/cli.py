@@ -1318,6 +1318,35 @@ def build_metaqa_snapshot(
     rprint(f"[green]wrote[/] {out_dir} ({n} subgraphs, sha {sha.hexdigest()[:12]})")
 
 
+@app.command("build-metaqa-2hop-snapshot")
+def build_metaqa_2hop_snapshot(
+    source: Annotated[str, typer.Option(help="existing 1-hop MetaQA snapshot")] = "metaqa",
+    name: Annotated[str, typer.Option(help="output snapshot name")] = "metaqa_2hop",
+    cap: Annotated[int, typer.Option(help="max edges per 2-hop neighborhood")] = 256,
+) -> None:
+    """Expand the 1-hop MetaQA snapshot to 2-hop neighborhoods (the multi-hop probe input)."""
+    import hashlib
+
+    from conceptformer.data.metaqa import build_2hop_subgraphs
+    from conceptformer.data.snapshot import iter_subgraphs
+
+    one_hop = list(iter_subgraphs(settings.snapshots_dir / source))
+    out_dir = settings.snapshots_dir / name
+    out_dir.mkdir(parents=True, exist_ok=True)
+    sha = hashlib.sha256()
+    n = 0
+    with (out_dir / "subgraphs.jsonl").open("w", encoding="utf-8") as fh:
+        for sg in build_2hop_subgraphs(one_hop, cap=cap):
+            line = sg.model_dump_json()
+            fh.write(line + "\n")
+            sha.update(line.encode("utf-8"))
+            n += 1
+    manifest = {"name": name, "source_snapshot": source, "hops": 2, "edge_cap": cap,
+                "n_subgraphs": n, "sha256": sha.hexdigest()}
+    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    rprint(f"[green]wrote[/] {out_dir} ({n} subgraphs, cap {cap}, sha {sha.hexdigest()[:12]})")
+
+
 @app.command("build-worldcup-snapshot")
 def build_worldcup_snapshot(
     kb: Annotated[str, typer.Option(help="path to WC2014.txt (subject<TAB>relation<TAB>object)")],

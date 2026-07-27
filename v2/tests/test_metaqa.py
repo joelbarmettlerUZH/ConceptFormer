@@ -1,6 +1,7 @@
 """Offline tests for the MetaQA cross-graph loader (data/metaqa.py)."""
 
 from conceptformer.data.metaqa import (
+    build_2hop_subgraphs,
     build_subgraphs,
     load_metaqa_qa,
     parse_kb_line,
@@ -38,6 +39,25 @@ def test_subgraphs_include_forward_and_reverse_edges():
     # Every KB entity gets a subgraph; the malformed line is dropped.
     assert set(sgs) == {"Kismet", "William Dieterle", "Marlene Dietrich",
                         "Top Hat", "Ginger Rogers"}
+
+
+def test_build_2hop_subgraphs_chains_and_caps():
+    one_hop = list(build_subgraphs(KB))
+    two_hop = {sg.center.qid: sg for sg in build_2hop_subgraphs(one_hop, cap=256)}
+    # Kismet's 2-hop set should reach Marlene Dietrich's OTHER films via the actor (chained edge).
+    # Marlene Dietrich (a Kismet cast member) also has "director of"/"actor in" edges in her own
+    # 1-hop subgraph; those become Kismet's 2-hop edges.
+    kismet = two_hop["Kismet"]
+    reached = {e.neighbor.qid for e in kismet.edges}
+    assert "William Dieterle" in reached  # 1-hop kept
+    assert "Marlene Dietrich" in reached
+    # 2-hop reaches a neighbor-of-neighbor not in Kismet's own 1-hop edges.
+    one_hop_reached = {e.neighbor.qid for e in kismet.edges[: len(one_hop[0].edges)]}
+    assert len(reached) >= len(one_hop_reached)
+    # cap is respected
+    assert all(len(sg.edges) <= 256 for sg in two_hop.values())
+    # self-loops excluded
+    assert all(e.neighbor.qid != c for c, sg in two_hop.items() for e in sg.edges)
 
 
 def test_parse_qa_line_and_loader():

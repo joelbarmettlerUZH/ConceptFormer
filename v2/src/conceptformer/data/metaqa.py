@@ -86,6 +86,40 @@ def build_subgraphs(kb_lines: Iterable[str]) -> Iterator[Subgraph]:
                        n_edges_total=len(edges))
 
 
+def build_2hop_subgraphs(one_hop: Iterable[Subgraph], cap: int = 256) -> Iterator[Subgraph]:
+    """Expand each entity's 1-hop neighborhood to 2 hops by self-joining the 1-hop snapshot.
+
+    For a center X, the returned edge set is X's own edges plus the edges of each 1-hop neighbor
+    (so a 2-hop-distant entity appears as some neighbor's neighbor). This is the input the
+    multi-hop probe feeds the encoder: the answer to a 2-hop question is present in the set but is
+    only reachable by chaining two edges. High-degree hubs make the raw 2-hop set explode
+    (MetaQA max 1-hop degree ~4300), so total edges are capped: all 1-hop edges are kept, then
+    neighbor edges are added round-robin across neighbors until ``cap`` (fairness across neighbors
+    rather than draining one hub). Edges are deduplicated by (property_id, neighbor.qid).
+    """
+    index = {sg.center.qid: sg.edges for sg in one_hop}
+    for qid, own in index.items():
+        seen = {(e.property_id, e.neighbor.qid) for e in own}
+        edges = list(own)
+        # Round-robin over neighbors' edge lists so no single hub monopolizes the budget.
+        queues = [iter(index.get(e.neighbor.qid, [])) for e in own]
+        while len(edges) < cap and queues:
+            still: list = []
+            for q in queues:
+                if len(edges) >= cap:
+                    break
+                for e2 in q:
+                    key = (e2.property_id, e2.neighbor.qid)
+                    if key not in seen and e2.neighbor.qid != qid:
+                        seen.add(key)
+                        edges.append(e2)
+                        still.append(q)
+                        break
+            queues = still
+        yield Subgraph(center=Entity(qid=qid, label=qid), edges=edges,
+                       n_edges_total=len(edges))
+
+
 def parse_qa_line(line: str) -> tuple[str, str, list[str]] | None:
     """``what films did [subject] star in\\tA|B`` -> (subject, question sans brackets, answers).
 
