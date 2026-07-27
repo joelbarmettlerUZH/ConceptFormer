@@ -618,11 +618,13 @@ per prompt, multi-entity composition is untested, and neighborhoods are 1-hop.
 
 \paragraph{Outlook.} Several extensions follow naturally. The encoder consumes embeddings,
 so multimodal knowledge such as entity images could enter through the same interface for
-natively multimodal frozen models, which is the subject of ongoing work. Wikidata carries
-labels in many languages, and multilingual concept tokens would test whether the learned
-mapping is language-independent. On the architecture side, injecting concept tokens into
-intermediate layers, in the spirit of deep prompt tuning \citep{ptuningv2}, remains
-unexplored.
+natively multimodal frozen models, which is the subject of ongoing work. A multilingual
+encoder is a second clear direction: our encoder transfers across entities and across graphs,
+but it is trained on English label embeddings and does not carry over to labels in another
+language, so serving a new language well will require training the encoder on that language's
+labels rather than relying on transfer. On the architecture side,
+injecting concept tokens into intermediate layers, in the spirit of deep prompt tuning
+\citep{ptuningv2}, remains unexplored.
 
 \section{Conclusion}
 
