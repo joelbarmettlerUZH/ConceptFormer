@@ -1136,3 +1136,32 @@ closure while home doubles), k4 jumps to a ~21% plateau holding through k16, k32
 32%. "Roughly half the home closure at every k>1" survives (45-63%); "monotone/same-shape"
 retired (k4 .240 > k8 .235, within noise -> plateau). Paper S5.4 + Fig 6 title/caption
 updated accordingly.
+
+---
+
+## Finding 21 — Cross-lingual: transfer is bounded by the label language, not the question/system language ✅
+
+**Setup.** PopQA translated to German (Gemma-3, 14,230 rows), German system prompt, German
+entity mention. Two concept conditions: English vs German entity labels. Eval-only, no
+retraining. 2x2 ablation (system lang x label lang, 0.6B k8): system prompt moves NOTHING
+(EN-labels 41%/40% closure under EN/DE system; DE-labels 8%/8%) -> system prompt dropped, fix
+German.
+
+**Accuracy (base->RAG gap closure), German system:**
+- EN labels: 0.6B k1-32 = 8/7/35/40/46/51%; 1.7B k8/k16 = 13/20%; 4B k8 = 34%.
+- DE labels: 0.6B = 3/2/9/8/9/17%; 1.7B = 1/3%; 4B = 7%.
+English labels ~match the English-question home curve; German labels collapse near floor at
+EVERY model size. The encoder is bound to its English training-label embedding distribution;
+it transfers across graphs (F17) but NOT across label language. Predictions under DE labels
+are fluent-but-wrong German (verified) -- not a pipeline bug.
+
+**Answer language (% German of distinguishable-form correct answers), k8:**
+- 0.6B: EN labels 25%, DE labels 59% (label language dominates at small scale).
+- 4B: EN labels 70%, DE labels 74% (effect washes out -- capable backbone answers in the
+  question language regardless). NOTE this revises the earlier "English concepts -> English
+  answers" read: that was the SMALL model's weak German, not an intrinsic imprint.
+
+**Story:** English concepts give knowledge (accuracy) but small models answer English; German
+concepts flip output language but can't inject; only a strong multilingual backbone gives
+both. Multilingual concept vectors need TRAINING -> paper Outlook + grant WP. Paper S5.6
+(fig_multilingual, tab:multilingual). Data: data/analysis/multilingual/, HF results/multilingual/.

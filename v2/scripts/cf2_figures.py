@@ -249,3 +249,66 @@ ax.legend(fontsize=9, loc="upper left")
 fig4.tight_layout()
 fig4.savefig(OUT / "fig_transfer.png", dpi=150, bbox_inches="tight")
 print("wrote fig_transfer.png")
+
+# ------------------------------------------ Fig 7: cross-lingual (German) label-language effect
+ML = ROOT / "data/analysis/multilingual"
+
+
+def ml_cell(pattern: str) -> tuple[float, float] | None:
+    """(gap-closed %, %German of distinguishable answers) for the one summary matching pattern."""
+    hits = list(ML.glob(f"{pattern}/summary.json"))
+    if not hits:
+        return None
+    d = json.loads(hits[0].read_text())
+    c, b, r = d["concept"]["acc"], d["base"]["acc"], d["rag"]["acc"]
+    lg = d["answer_language_of_correct_concept"]
+    dist = lg["en"] + lg["localized"]
+    return 100 * (c - b) / (r - b), (100 * lg["localized"] / dist if dist else 0.0)
+
+
+def en_label_06b(k: int) -> tuple[float, float] | None:  # DE system, EN labels, 0.6B
+    if k == 8:
+        return ml_cell("pc_k8_best__popqa_abl_enlabels_desys__localized__sys-de")
+    return ml_cell(f"pc_k{k}_best__popqa_desys_enlabels_0.6b_k{k}__localized__sys-de")
+
+
+fig5, (axa, axb) = plt.subplots(1, 2, figsize=(11, 4.0))
+# Panel A: accuracy (gap closure) vs k at 0.6B, English vs German concept labels.
+xs = KS
+en = [en_label_06b(k) for k in KS]
+de = [ml_cell(f"pc_k{k}_best__popqa_fullde_0.6b_k{k}__localized__sys-de") for k in KS]
+axa.plot(xs, [v[0] if v else None for v in en], "o-", color=BLUE, label="English-labeled concepts")
+axa.plot(xs, [v[0] if v else None for v in de], "s--", color=ORANGE,
+         label="German-labeled concepts")
+axa.set_xscale("log", base=2)
+axa.set_xticks(KS, [str(k) for k in KS])
+axa.set_xlabel("concept tokens $k$")
+axa.set_ylabel("base$\\rightarrow$RAG gap closed (%)")
+axa.set_title("German questions, Qwen3-0.6B: accuracy follows\nthe concept label language",
+              fontsize=10)
+axa.grid(True, alpha=0.25)
+axa.legend(fontsize=9)
+# Panel B: %German answers vs model size at k8, English vs German concept labels.
+sizes = ["0.6B", "1.7B", "4B"]
+en_k8 = [
+    en_label_06b(8),
+    ml_cell("q3b17_100k_k8_s0_best__popqa_desys_enlabels_1.7b_k8__localized__sys-de"),
+    ml_cell("q3b4_100k_k8_s0_best__popqa_desys_enlabels_4b_k8__localized__sys-de"),
+]
+de_k8 = [ml_cell("pc_k8_best__popqa_fullde_0.6b_k8__localized__sys-de"),
+         ml_cell("q3b17_100k_k8_s0_best__popqa_fullde_1.7b_k8__localized__sys-de"),
+         ml_cell("q3b4_100k_k8_s0_best__popqa_fullde_4b_k8__localized__sys-de")]
+axb.plot(sizes, [v[1] if v else None for v in en_k8], "o-", color=BLUE,
+         label="English-labeled concepts")
+axb.plot(sizes, [v[1] if v else None for v in de_k8], "s--", color=ORANGE,
+         label="German-labeled concepts")
+axb.set_ylim(0, 100)
+axb.set_xlabel("frozen backbone")
+axb.set_ylabel("answers given in German (% of distinguishable)")
+axb.set_title("Answer language ($k$=8): label-language effect\nwashes out as the backbone scales",
+              fontsize=10)
+axb.grid(True, alpha=0.25)
+axb.legend(fontsize=9, loc="lower right")
+fig5.tight_layout()
+fig5.savefig(OUT / "fig_multilingual.png", dpi=150, bbox_inches="tight")
+print("wrote fig_multilingual.png")

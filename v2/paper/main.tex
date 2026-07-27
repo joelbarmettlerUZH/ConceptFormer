@@ -60,8 +60,10 @@
   the Qwen3 and Gemma-3 families. In both, run-to-run variance at the largest corpus
   overtakes the effects under study. Counterfactual probes confirm
   that answers follow the injected graph, and the encoder transfers zero-shot to MetaQA,
-  raising accuracy from 0.06 to 0.34 on a knowledge graph it never saw in training. All
-  corpora, checkpoints, and per-item evaluation outputs are released.
+  raising accuracy from 0.06 to 0.34 on a knowledge graph it never saw in training. This
+  transfer holds across graphs but stops at the label language: an English-trained encoder
+  does not carry over to German-labeled graphs. All corpora, checkpoints, and per-item
+  evaluation outputs are released.
 \end{abstract}
 
 \section{Introduction}
@@ -103,9 +105,10 @@ untrained-injection control (\S\ref{sec:efficiency}).
 size, and frozen-model size, repeated across two model families (Qwen3 and Gemma-3), showing
 how the three trade against each other and which patterns are family-general
 (\S\ref{sec:scaling}).
-\textbf{(3)}~Causal probes showing that answers follow the injected graph, and zero-shot
-transfer of the trained encoder to an unseen knowledge graph (\S\ref{sec:probes},
-\S\ref{sec:transfer}).
+\textbf{(3)}~Causal probes showing that answers follow the injected graph, zero-shot transfer
+of the trained encoder to an unseen knowledge graph, and a cross-lingual study locating the
+transfer's boundary at the label language (\S\ref{sec:probes}, \S\ref{sec:transfer},
+\S\ref{sec:multilingual}).
 \textbf{(4)}~An open release of the corpora, checkpoints, evaluation harness, and per-item
 outputs, enabling paired re-analysis of every reported comparison.
 
@@ -581,6 +584,67 @@ prompts with several entities. Prompt augmentation gives a small gain that is si
 under pooled paired testing but varies across seeds. Re-sampling teacher distractors at each
 step has no effect at our context budget.
 
+\subsection{Cross-lingual transfer}
+\label{sec:multilingual}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/fig_multilingual.png}
+  \caption{German PopQA (14{,}230 questions, German system prompt, German entity mention).
+  Left: on Qwen3-0.6B, base$\to$RAG gap closure across $k$ for concepts built from English
+  vs.\ German entity labels. Right: at $k{=}8$, the share of correct answers given in German
+  (of those where the German and English answer forms differ), by backbone.}
+  \label{fig:multilingual}
+\end{figure}
+
+The encoder consumes only label embeddings, so cross-graph transfer (\S\ref{sec:transfer})
+raises the question of whether it also transfers across the label \emph{language}. We
+translate PopQA into German with Gemma-3 \citep{gemma3} (14{,}230 questions), give the frozen
+model a German system prompt, and place the entity mention in German. Two conditions differ
+only in the concept tokens: built from the entities' English Wikidata labels, or from their
+German labels. Accuracy accepts an answer in either language, and we record which language
+each correct answer used. A system-prompt-language ablation (English vs.\ German) moved
+neither accuracy nor answer language, so we fix the system prompt to German.
+
+\begin{table}[t]
+  \caption{German PopQA by concept label language (German system prompt, German mention).
+  Accuracy is base$\to$RAG gap closure; ``DE ans.'' is the fraction of correct answers given
+  in German among those whose German and English forms differ. English-question home closure
+  is shown for reference.}
+  \label{tab:multilingual}
+  \centering
+  \small
+  \begin{tabular}{lccccc}
+    \toprule
+    & \multicolumn{2}{c}{English-labeled concepts} & \multicolumn{2}{c}{German-labeled concepts} & home (EN)\\
+    \cmidrule(lr){2-3}\cmidrule(lr){4-5}
+    & closure & DE ans. & closure & DE ans. & closure\\
+    \midrule
+    0.6B $k{=}8$ & 40\% & 25\% & 8\% & 59\% & 44\%\\
+    0.6B $k{=}32$ & 51\% & 18\% & 17\% & 58\% & 51\%\\
+    1.7B $k{=}8$ & 13\% & 56\% & 1\% & 52\% & --\\
+    4B $k{=}8$ & 34\% & 70\% & 7\% & 74\% & --\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Accuracy is governed by the concept tokens' label language, not by the question or system
+language. English-labeled concepts recover 40--51\% of the base-to-RAG gap on German
+questions at $k{\ge}8$ (0.6B), close to the English-question figure, while German-labeled
+concepts recover at most 17\%, near the no-injection floor, at every model size
+(Figure~\ref{fig:multilingual}, left; Table~\ref{tab:multilingual}). The encoder, trained on
+English label embeddings, transfers across graphs but not across the label language: German
+label embeddings are out-of-distribution for it, and the frozen model falls back to fluent
+but wrong German.
+
+The label language does steer the \emph{output} language, most strongly on the smallest
+backbone (0.6B, $k{=}8$: 59\% German answers from German-labeled concepts vs.\ 25\% from
+English-labeled ones). This effect narrows as the frozen model grows: at 4B both conditions
+answer in German about 70\% of the time (Figure~\ref{fig:multilingual}, right), because a
+stronger multilingual backbone follows the question's language on its own. Serving a new
+language with both accuracy and native output therefore needs either a strong multilingual
+backbone or an encoder trained on that language's labels.
+
 \section{Discussion}
 
 \paragraph{Ceiling or steerability.} The model-size result admits two readings, and they make
@@ -621,8 +685,8 @@ so multimodal knowledge such as entity images could enter through the same inter
 natively multimodal frozen models, which is the subject of ongoing work. A multilingual
 encoder is a second clear direction: our encoder transfers across entities and across graphs,
 but it is trained on English label embeddings and does not carry over to labels in another
-language, so serving a new language well will require training the encoder on that language's
-labels rather than relying on transfer. On the architecture side,
+language (\S\ref{sec:multilingual}), so serving a new language well will require training the
+encoder on that language's labels rather than relying on transfer. On the architecture side,
 injecting concept tokens into intermediate layers, in the spirit of deep prompt tuning
 \citep{ptuningv2}, remains unexplored.
 
