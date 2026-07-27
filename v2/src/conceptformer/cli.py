@@ -1318,6 +1318,68 @@ def build_metaqa_snapshot(
     rprint(f"[green]wrote[/] {out_dir} ({n} subgraphs, sha {sha.hexdigest()[:12]})")
 
 
+@app.command("build-localized-snapshot")
+def build_localized_snapshot(
+    source: Annotated[str, typer.Option(help="English snapshot to relabel")] = "popqa_full",
+    name: Annotated[str, typer.Option(help="output snapshot name")] = "popqa_full_de",
+    lang: Annotated[str, typer.Option(help="target label language")] = "de",
+) -> None:
+    """Relabel a snapshot's entities and properties into ``lang`` (concept vectors + RAG go local).
+
+    Reads the source snapshot (which stores each edge's property_id and neighbor QID), fetches the
+    target-language label for every property and entity from Wikidata, and rewrites the subgraphs
+    with those labels. Entities without a target-language label keep the English one (so the graph
+    stays complete). The featurizer then builds concept tokens from target-language strings, and
+    verbalize produces target-language RAG facts -- the fully-localized condition.
+    """
+    import hashlib
+
+    from conceptformer.data.snapshot import iter_subgraphs
+    from conceptformer.data.wikidata import WikidataClient
+    from conceptformer.schemas import Edge, Entity, Subgraph
+
+    src_sgs = list(iter_subgraphs(settings.snapshots_dir / source))
+    pids = sorted({e.property_id for sg in src_sgs for e in sg.edges if e.property_id})
+    qids = sorted(
+        {sg.center.qid for sg in src_sgs}
+        | {e.neighbor.qid for sg in src_sgs for e in sg.edges if e.neighbor.qid}
+    )
+    rprint(f"relabeling {len(src_sgs)} subgraphs to {lang}: {len(pids)} properties, "
+           f"{len(qids)} entities…")
+    with WikidataClient() as wd:
+        p_lab = {p: (v[0] if v else "") for p, v in wd.surface_forms(pids, lang).items()}
+        q_lab = {q: (v[0] if v else "") for q, v in wd.surface_forms(qids, lang).items()}
+
+    out_dir = settings.snapshots_dir / name
+    out_dir.mkdir(parents=True, exist_ok=True)
+    sha = hashlib.sha256()
+    n = 0
+    with (out_dir / "subgraphs.jsonl").open("w", encoding="utf-8") as fh:
+        for sg in src_sgs:
+            center = Entity(qid=sg.center.qid, label=q_lab.get(sg.center.qid) or sg.center.label,
+                            description=sg.center.description, rank=sg.center.rank)
+            edges = [
+                Edge(property_id=e.property_id,
+                     property_label=p_lab.get(e.property_id) or e.property_label,
+                     neighbor=Entity(qid=e.neighbor.qid,
+                                     label=q_lab.get(e.neighbor.qid) or e.neighbor.label,
+                                     description=e.neighbor.description, rank=e.neighbor.rank))
+                for e in sg.edges
+            ]
+            line = Subgraph(center=center, edges=edges,
+                            n_edges_total=sg.n_edges_total).model_dump_json()
+            fh.write(line + "\n")
+            sha.update(line.encode("utf-8"))
+            n += 1
+    covered = sum(1 for v in q_lab.values() if v)
+    manifest = {"name": name, "source_snapshot": source, "label_language": lang,
+                "n_subgraphs": n, "entity_label_coverage": round(covered / max(1, len(qids)), 4),
+                "sha256": sha.hexdigest()}
+    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    rprint(f"[green]wrote[/] {out_dir} ({n} subgraphs, {lang} entity-label coverage "
+           f"{100*covered/max(1,len(qids)):.0f}%, sha {sha.hexdigest()[:12]})")
+
+
 @app.command("translate-eval-set")
 def translate_eval_set(
     source: Annotated[str, typer.Option(help="popqa | a MetaQA-format QA file path")],
@@ -1503,6 +1565,7 @@ def eval_multilingual(
     snapshot: Annotated[str, typer.Option()] = "popqa_full",
     benchmark: Annotated[str, typer.Option(help="report tag")] = "popqa_de",
     mention: Annotated[str, typer.Option(help="en | localized")] = "en",
+    system_lang: Annotated[str, typer.Option(help="system-prompt language: en | de")] = "en",
     n: Annotated[int, typer.Option(help="questions to score (0 = all)")] = 0,
     gen_batch: Annotated[int, typer.Option()] = 64,
     max_new: Annotated[int, typer.Option()] = 32,
@@ -1512,16 +1575,23 @@ def eval_multilingual(
     """Cross-lingual eval: does concept injection help when the question is in another language?
 
     Scores concept/base/RAG on a translated eval set (eval-only, English-trained encoder). The
-    ``mention`` flag picks whether the entity appears in English or its localized form. Accuracy
-    accepts an answer in EITHER language; the report additionally classifies which language each
-    correct concept answer was given in (en / localized / both), the second research question.
+    ``mention`` flag picks whether the entity appears in English or its localized form, and
+    ``system_lang`` the system-prompt language. For the fully-localized setting point ``snapshot``
+    at a localized snapshot too (build-localized-snapshot), so the concept vectors and the RAG
+    facts are built from target-language labels. Accuracy accepts an answer in EITHER language;
+    the report classifies which language each correct concept answer was given in.
     """
-    from conceptformer.data.multilingual import TranslatedQA, classify_answer_language
+    from conceptformer.data.multilingual import (
+        SYSTEM_PROMPTS,
+        TranslatedQA,
+        classify_answer_language,
+    )
     from conceptformer.data.snapshot import iter_subgraphs
     from conceptformer.eval.stats import summarize_accuracy
     from conceptformer.generate.signal import answer_ok
-    from conceptformer.train.trainer import TEACHER_SYSTEM
     from conceptformer.verbalize import verbalize_budgeted
+
+    system = SYSTEM_PROMPTS.get(system_lang, SYSTEM_PROMPTS["en"])
 
     trainer, blob, chat = _load_trained_checkpoint(
         checkpoint, model, device, use_generation_cache=True
@@ -1545,14 +1615,14 @@ def eval_multilingual(
     for i in range(0, len(picks), gen_batch):
         chunk = picks[i : i + gen_batch]
         concept_preds += trainer.generate_student_batch(
-            [(sg, q) for sg, q, _ in chunk], max_new, TEACHER_SYSTEM
+            [(sg, q) for sg, q, _ in chunk], max_new, system
         )
     base_preds = chat.generate_batch(
-        [(TEACHER_SYSTEM, q) for _, q, _ in picks], max_new_tokens=max_new, batch_size=gen_batch
+        [(system, q) for _, q, _ in picks], max_new_tokens=max_new, batch_size=gen_batch
     )
     budget = int(trainer.cfg.rag_context_tokens)
     rag_preds = chat.generate_batch(
-        [(TEACHER_SYSTEM, f"{verbalize_budgeted(sg, chat.count_tokens, budget)}\n\n{q}")
+        [(system, f"{verbalize_budgeted(sg, chat.count_tokens, budget)}\n\n{q}")
          for sg, q, _ in picks],
         max_new_tokens=max_new, batch_size=gen_batch,
     )
@@ -1574,14 +1644,15 @@ def eval_multilingual(
     lang_counts = {k: langs.count(k) for k in ("en", "localized", "both", "neither")}
     report = {
         "checkpoint": checkpoint, "benchmark": benchmark, "snapshot": snapshot,
-        "mention": mention, "lang": rows[0].lang if rows else "", "config": blob["config"],
+        "mention": mention, "system_lang": system_lang,
+        "lang": rows[0].lang if rows else "", "config": blob["config"],
         "n": len(per_item),
         "concept": summarize_accuracy(c_flags), "base": summarize_accuracy(b_flags),
         "rag": summarize_accuracy(r_flags),
         "answer_language_of_correct_concept": lang_counts,
     }
     out_dir = (settings.data_root / "analysis" / "multilingual"
-               / f"{checkpoint}__{benchmark}__{mention}")
+               / f"{checkpoint}__{benchmark}__{mention}__sys-{system_lang}")
     out_dir.mkdir(parents=True, exist_ok=True)
     with (out_dir / "items.jsonl").open("w", encoding="utf-8") as fh:
         for row in per_item:

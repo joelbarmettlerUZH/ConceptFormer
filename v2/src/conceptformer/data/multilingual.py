@@ -19,6 +19,15 @@ from pydantic import BaseModel, Field
 
 from conceptformer.eval.metrics import word_boundary_match
 
+# System prompts per language, for the fully-localized eval (the English default matches training;
+# a target-language system removes the English-anchoring confound when asking which language the
+# model answers in). Kept minimal and parallel to TEACHER_SYSTEM ("You are a helpful assistant.").
+SYSTEM_PROMPTS = {
+    "en": "You are a helpful assistant.",
+    "de": "Du bist ein hilfreicher Assistent.",
+    "fr": "Vous etes un assistant utile.",
+}
+
 
 class TranslatedQA(BaseModel):
     """One QA row translated to a target language, with the entity mention tracked both ways.
