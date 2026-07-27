@@ -60,9 +60,10 @@
   the Qwen3 and Gemma-3 families. In both, run-to-run variance at the largest corpus
   overtakes the effects under study. Counterfactual probes confirm
   that answers follow the injected graph, and the encoder transfers zero-shot to MetaQA,
-  raising accuracy from 0.06 to 0.34 on a knowledge graph it never saw in training. This
-  transfer holds across graphs but stops at the label language: an English-trained encoder
-  does not carry over to German-labeled graphs. All corpora, checkpoints, and per-item
+  raising accuracy from 0.06 to 0.34 on a knowledge graph it never saw in training, and
+  reaching a similar ceiling on a second foreign graph. This transfer holds across graphs but
+  stops at the label language: an English-trained encoder does not carry over to
+  German-labeled graphs. All corpora, checkpoints, and per-item
   evaluation outputs are released.
 \end{abstract}
 
@@ -517,10 +518,10 @@ accuracy of the $k{=}8$ model varies with a standard deviation of at most 1.1\,p
 \begin{figure}[t]
   \centering
   \includegraphics[width=0.6\linewidth]{figures/fig_transfer.png}
-  \caption{Share of the base-to-RAG gap closed, on the home graph (Wikidata/\popqa{}, 3
-  seeds) and zero-shot on MetaQA (one seed, Wilson CIs). Transfer retains roughly half of
-  the home-graph gap closure at every $k$ above 1, but rises in steps rather than
-  smoothly.}
+  \caption{Share of the base-to-RAG gap closed vs.\ $k$: the home graph (Wikidata/\popqa{}, 3
+  seeds) and two zero-shot foreign graphs, MetaQA (movies) and WorldCup2014 (sports), one
+  seed each (Wilson CIs). The two foreign graphs converge to $\sim$32\% closure at $k{=}32$,
+  about 60\% of the home-graph value.}
   \label{fig:transfer}
 \end{figure}
 
@@ -530,15 +531,15 @@ general edge-to-concept mapping will actually do so. Transfer of this kind has p
 graph retrievers, whose graph foundation models generalize to unseen datasets while the LLM
 still reads text \citep{gfmrag}, and graph-token systems reach new domains through
 multi-domain instruction tuning \citep{uniglm}. Zero-shot transfer of the token interface
-itself has, to our knowledge, not been shown before. We test this on MetaQA \citep{metaqa}, a
-movie knowledge graph with 43k entities, 9 relations, and a 1-hop QA benchmark in the same
-style as \popqa{}. The graph shares nothing with Wikidata. It has no entity identifiers (the
-label string is the identity), its 9 relations are disjoint from Wikidata's relation
-vocabulary, and its questions are template-generated with multiple accepted answers. We map
-each relation to a natural-language label, give each incoming edge a hand-written reverse
-reading (\texttt{starred\_actors} becomes ``cast member'' and ``actor in''), encode each
-1-hop neighborhood exactly as in \S\ref{sec:method}, and score the Wikidata-trained
-checkpoints unchanged.
+itself has, to our knowledge, not been shown before. We test it on two foreign graphs. MetaQA
+\citep{metaqa} is a movie knowledge graph (43k entities, 9 relations) with a 1-hop QA
+benchmark in \popqa{}'s style; WorldCup2014 \citep{worldcup} is a smaller football graph
+(1{,}088 entities, relations such as ``plays in club'' and ``plays for country'') with native
+1-hop questions. Both share nothing with Wikidata: disjoint relation vocabularies, and
+entities identified by their label strings. We map each relation to a natural-language label
+(MetaQA needs hand-written reverse readings, e.g.\ \texttt{starred\_actors} becomes ``cast
+member''; WorldCup ships its own inverse edges), encode each 1-hop neighborhood exactly as in
+\S\ref{sec:method}, and score the Wikidata-trained checkpoints unchanged.
 
 Injection transfers. At $k{=}32$, the concept tokens reach 0.335 accuracy on a graph the
 encoder has never seen, against a base of 0.058 (Table~\ref{tab:transfer}). Every $k$ beats
@@ -551,9 +552,15 @@ adds nothing zero-shot, accuracy plateaus from $k{=}4$ through $k{=}16$, and the
 arrives only at $k{=}32$. Some of each capacity increment appears to carry
 Wikidata-specific refinement that does not survive the graph swap. The high RAG reference
 (0.921) shows that the frozen model can answer in this domain when given text, so the
-remaining gap belongs to the transferred encoder. Together with the probes of
-\S\ref{sec:probes}, transfer supports the inductive claim: the encoder learned a mapping
-from labeled edges to concept tokens that generalizes beyond its training graph.
+remaining gap belongs to the transferred encoder. WorldCup shows the same effect on a second,
+unrelated domain: gap closure rises from 13\% at $k{=}1$ to 31\% at $k{=}32$, and although its
+mid-range curve is noisier (single-seed checkpoints on a small graph), the two foreign graphs
+converge to nearly the same endpoint, about 31--32\% at $k{=}32$, roughly 60\% of the
+home-graph closure (Figure~\ref{fig:transfer}). That two disjoint domains reach the same
+budget-32 transfer accuracy suggests the high-budget transfer ceiling is a property of the
+method rather than the target graph. Together with the probes of \S\ref{sec:probes}, transfer
+supports the inductive claim: the encoder learned a mapping from labeled edges to concept
+tokens that generalizes beyond its training graph.
 
 \subsection{Ablations}
 
@@ -815,6 +822,10 @@ funding.
 \bibitem{metaqa} Y.~Zhang, H.~Dai, Z.~Kozareva, A.~Smola, and L.~Song.
 \newblock Variational reasoning for question answering with knowledge graph.
 \newblock AAAI 2018; arXiv:1709.04071.
+
+\bibitem{worldcup} M.~Zhou, M.~Huang, and X.~Zhu.
+\newblock An interpretable reasoning network for multi-relation question answering.
+\newblock COLING 2018; arXiv:1801.04726.
 
 \bibitem{xrag} X.~Cheng, X.~Wang, X.~Zhang, T.~Ge, S.~Chen, F.~Wei, H.~Zhang, and D.~Zhao.
 \newblock xRAG: Extreme context compression for retrieval-augmented generation with one token.

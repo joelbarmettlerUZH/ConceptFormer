@@ -233,17 +233,30 @@ for k in KS:
     # Single checkpoint: propagate the concept Wilson CI through the closure (brackets fixed).
     half = (c["ci95"][1] - c["ci95"][0]) / 2
     mq_e.append(100 * half / (r["acc"] - b["acc"]))
+wc_x, wc_y, wc_e = [], [], []
+for k in KS:
+    p = TRANSFER / f"pc_k{k}_best__worldcup_1hop" / "summary.json"
+    if not p.exists():
+        continue
+    d = json.loads(p.read_text())
+    c, b, r = d["concept"], d["base"], d["rag"]
+    wc_x.append(k)
+    wc_y.append(closure(c["acc"], b["acc"], r["acc"]))
+    half = (c["ci95"][1] - c["ci95"][0]) / 2
+    wc_e.append(100 * half / (r["acc"] - b["acc"]))
 fig4, ax = plt.subplots(figsize=(6.2, 4.0))
 ax.errorbar(home_x, home_y, yerr=home_e, fmt="o-", color=BLUE, capsize=3,
             label="Wikidata (home): PopQA, unseen entities")
 ax.errorbar(mq_x, mq_y, yerr=mq_e, fmt="D--", color=ORANGE, capsize=3,
-            label="MetaQA (zero-shot): unseen graph")
+            label="MetaQA (zero-shot): movies")
+ax.errorbar(wc_x, wc_y, yerr=wc_e, fmt="^:", color=GREEN, capsize=3,
+            label="WorldCup2014 (zero-shot): sports")
 ax.set_xscale("log", base=2)
 ax.set_xticks(KS, [str(k) for k in KS])
 ax.set_xlabel("concept tokens $k$")
 ax.set_ylabel("base$\\rightarrow$RAG gap closed (%)")
-ax.set_title("Same encoder, two graphs: transfer retains roughly half\nthe gap closure, "
-             "rising in steps rather than smoothly", fontsize=10)
+ax.set_title("Same encoder, three graphs: two foreign graphs converge\nto "
+             "$\\sim$32% gap closure at $k$=32", fontsize=10)
 ax.grid(True, alpha=0.25)
 ax.legend(fontsize=9, loc="upper left")
 fig4.tight_layout()
