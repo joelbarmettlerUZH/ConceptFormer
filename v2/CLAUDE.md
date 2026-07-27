@@ -202,6 +202,8 @@ knowledge injection). Never quote a pre-M7 number in the paper.
   or `state="finished"`. `scan_history` can also page oddly — sanity-check row counts.
 - **`CUDA_VISIBLE_DEVICES=N` + `--device cuda:N` = crash** (use `--device cuda:0`).
 - **`batch 64` OOMs** on 24 GB.
+- **Gemma-3 needs half the Qwen batch at equal size** (262k vocab vs 151k: logits/KL rows are
+  ~1.7x larger). gemma-3-4b tier-cftrain OOMed at batch 32, fine at 16; teacher paths 16 -> 8.
 - **Host-RAM OOM at 100k-corpus prepare(): pass `--no-cache-teacher`.** The CLI defaults
   `--cache-teacher` ON; the teacher-hidden cache costs ~path x d_llm x 4 B per row in host RAM
   (~160 KB/row at d=2048 -> ~130 GB at 800k rows), and the kernel OOM-kills python silently

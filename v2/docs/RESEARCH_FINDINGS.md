@@ -1103,3 +1103,28 @@ either family. NOT replicated: Qwen's 4B uptick (+6.2->+8.2, outside noise) -- G
 flatten. The decisive test (valley + variance at 100k) is Stage B: Gemma 100k corpora
 pending user decision (~330 GPUh local / pod). Seed spreads tight (<=0.8) at 10k in both
 families, consistent with instability being corpus-scale-driven (F18).
+
+---
+
+## Finding 20 — Gemma-3 100k: the mid-scale valley replicates; instability is corpus-linked, NOT monotone in model size ✅ (all cells 3 seeds)
+
+**Numbers (PopQA, k8, 100k, 3 seeds).** 270m: .268+/-.044 (margin +22.9+/-4.4, gain 1.6x) |
+1b: .217+/-.023 (+10.4+/-2.3, gain 1.3x) | 4b: .281+/-.006 (+11.5+/-0.6, gain 1.6x).
+
+**Replicates:** (a) mid-scale valley — the 1b has the smallest margin AND the smallest data
+gain in its family (1.3x between 1.6x/1.6x), mirroring Qwen's 2.1x between 3.5x/2.7x;
+(b) smallest backbone posts the largest margin at both scales; (c) 100k instability — at
+least one cell per family with sigma > 4.
+
+**Does NOT replicate:** variance direction. Qwen 100k sigma RISES with scale (0.2/1.9/4.2);
+Gemma 100k sigma FALLS with scale (4.4/2.3/0.6). Variance is a property of the
+backbone-corpus PAIR, not of model size. (Candidate factor worth noting: gemma-3-270m has
+d_llm=640 < encoder d_model=1024 — the only cell where the resampler is wider than its
+target. Untested.) Also: Gemma data gains (1.3-1.6x) are uniformly ~half Qwen's (2.1-3.5x);
+4b>1b recovery directional at 100k but within noise. Discussion verdict updated: stability
+binds scaled injection in BOTH families; "monotone variance growth" (F18 wording) was
+Qwen-specific and is retired.
+
+**Re-verify:** eval_final/gemma3-{270m,1b,4b}_100k_k8_s{0,1,2}_best; W&B group
+family-gemma3-100k; mirrored to HF results/eval_final. Ops: Gemma 262k vocab needs HALF the
+Qwen batch at equal size (4b tier OOMed at batch 32, fine at 16; teacher paths 16->8).
