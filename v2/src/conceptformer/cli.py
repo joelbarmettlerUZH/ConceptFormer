@@ -1318,6 +1318,92 @@ def build_metaqa_snapshot(
     rprint(f"[green]wrote[/] {out_dir} ({n} subgraphs, sha {sha.hexdigest()[:12]})")
 
 
+@app.command("translate-eval-set")
+def translate_eval_set(
+    source: Annotated[str, typer.Option(help="popqa | a MetaQA-format QA file path")],
+    out: Annotated[str, typer.Option(help="output TranslatedQA JSONL path")],
+    lang: Annotated[str, typer.Option(help="target language code")] = "de",
+    n: Annotated[int, typer.Option(help="questions to translate (0 = all)")] = 0,
+    base_url: Annotated[str, typer.Option(help="vLLM server")] = "http://localhost:8000/v1",
+) -> None:
+    """Translate an eval set to ``lang`` for the multilingual transfer eval (eval-only).
+
+    Keeps the entity mention in English (mention-anchored splice needs a locatable span), then
+    for PopQA (Wikidata-linked) fetches the target-language subject label and answer aliases so
+    the localized-mention and answer-language conditions are available. MetaQA entities are not
+    Wikidata-linked, so its rows get the reduced set (English mention + English answer aliases).
+    """
+    import asyncio
+
+    from conceptformer.cache import KVCache
+    from conceptformer.data.benchmarks import load_popqa
+    from conceptformer.data.metaqa import load_metaqa_qa
+    from conceptformer.data.multilingual import (
+        TranslatedQA,
+        localize_mention,
+        mention_preserved,
+    )
+    from conceptformer.data.wikidata import WikidataClient
+    from conceptformer.eval.evalsets import sample_rows
+    from conceptformer.generate.translate import GemmaTranslator
+
+    if source == "popqa":
+        rows = load_popqa()
+        is_wikidata = True
+    else:
+        with Path(source).open(encoding="utf-8") as fh:
+            rows = load_metaqa_qa(fh)
+        is_wikidata = False
+    rows = sample_rows(rows, n)  # prefix-consistent frozen subset; 0 = all
+    rprint(f"translating {len(rows)} {source} questions -> {lang}…")
+
+    # Entity mention per row: PopQA questions embed the subject as a QID-linked label; MetaQA's
+    # subject_qid IS the surface string. We tell the translator the English mention so it can keep
+    # it verbatim, and later verify it survived (mention-anchored splice needs the span).
+    gen_cache = KVCache(settings.generation_cache_path)
+    translator = GemmaTranslator(base_url=base_url, lang=lang, cache=gen_cache)
+    results = asyncio.run(translator.translate([r.question for r in rows]))
+    gen_cache.close()
+
+    de_label: dict[str, str] = {}
+    de_answer: dict[str, list[str]] = {}
+    if is_wikidata:
+        subj = sorted({r.subject_qid for r in rows})
+        ans = sorted({r.answer_qid for r in rows if r.answer_qid})
+        with WikidataClient() as wd:
+            de_label = {q: (v[0] if v else "") for q, v in wd.surface_forms(subj, lang).items()}
+            de_answer = wd.surface_forms(ans, lang)
+
+    written = kept = 0
+    with Path(out).open("w", encoding="utf-8") as fh:
+        for r, tr in zip(rows, results, strict=True):
+            written += 1
+            if tr is None:
+                continue
+            # The translator returns the entity's surface form it kept in the sentence; we anchor
+            # on that span (verified present below) rather than parsing the question text.
+            mention_en = tr.mention_translated
+            if not mention_preserved(tr.question_translated, mention_en):
+                continue  # span lost in translation -> cannot anchor; drop
+            mention_loc = de_label.get(r.subject_qid, mention_en) or mention_en
+            kept += 1
+            row = TranslatedQA(
+                subject_qid=r.subject_qid, lang=lang, question_source=r.question,
+                question_en_mention=tr.question_translated,
+                question_localized=localize_mention(
+                    tr.question_translated, mention_en, mention_loc
+                ),
+                mention_en=mention_en, mention_localized=mention_loc,
+                answer_labels_en=r.answer_labels,
+                answer_labels_localized=(
+                    de_answer.get(r.answer_qid or "", []) if is_wikidata else r.answer_labels
+                ),
+            )
+            fh.write(row.model_dump_json() + "\n")
+    rprint(f"[green]wrote[/] {out}: {kept}/{written} rows (dropped {written - kept} "
+           f"where the entity span was lost in translation)")
+
+
 @app.command("eval-transfer")
 def eval_transfer(
     checkpoint: Annotated[str, typer.Option(help="trained checkpoint name or path")],

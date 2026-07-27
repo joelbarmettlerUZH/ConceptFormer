@@ -191,21 +191,29 @@ class WikidataClient:
             reraise=True,
         )
 
-    def _params(self, ids: Sequence[str], props: str) -> dict[str, str | int]:
+    def _params(
+        self, ids: Sequence[str], props: str, languages: str | None = None
+    ) -> dict[str, str | int]:
         return {
             "action": "wbgetentities",
             "ids": "|".join(ids),
             "props": props,
-            "languages": self.cfg.api_languages,
+            "languages": languages or self.cfg.api_languages,
             "format": "json",
             "maxlag": self.cfg.maxlag,
         }
 
-    def _api_get_entities(self, ids: list[str], props: str) -> dict[str, dict]:
-        return self._retryer(self._api_get_entities_once, ids, props)
+    def _api_get_entities(
+        self, ids: list[str], props: str, languages: str | None = None
+    ) -> dict[str, dict]:
+        return self._retryer(self._api_get_entities_once, ids, props, languages)
 
-    def _api_get_entities_once(self, ids: list[str], props: str) -> dict[str, dict]:
-        resp = self._client.get(self.cfg.wikidata_api_url, params=self._params(ids, props))
+    def _api_get_entities_once(
+        self, ids: list[str], props: str, languages: str | None = None
+    ) -> dict[str, dict]:
+        resp = self._client.get(
+            self.cfg.wikidata_api_url, params=self._params(ids, props, languages)
+        )
         resp.raise_for_status()
         return _entities_from_response(resp.json())
 
@@ -241,6 +249,40 @@ class WikidataClient:
             cap=cap, always_keep=always_keep, langs=self.cfg.label_languages,
             pagerank=self._pagerank,
         )
+
+    def surface_forms(self, qids: Sequence[str], lang: str) -> dict[str, list[str]]:
+        """{qid: [label, *aliases]} in ``lang`` -- the accepted answer strings for that language.
+
+        Used by the multilingual eval to build target-language answer-alias sets (and localized
+        entity mentions). Fetches labels+aliases (the lite tier omits aliases), dedup-preserving
+        order with the canonical label first; empty list if the entity has no ``lang`` surface form.
+        """
+        raw = self._get_labels_aliases(qids, lang)
+        out: dict[str, list[str]] = {}
+        for qid in qids:
+            ent = raw.get(qid, {})
+            forms: list[str] = []
+            label = ent.get("labels", {}).get(lang, {}).get("value")
+            if label:
+                forms.append(label)
+            forms += [a["value"] for a in ent.get("aliases", {}).get(lang, []) if a.get("value")]
+            out[qid] = list(dict.fromkeys(forms))
+        return out
+
+    def _get_labels_aliases(self, qids: Sequence[str], lang: str) -> dict[str, dict]:
+        """Cached batched fetch of labels+aliases in ``lang`` (a tier the neighborhood never needs).
+
+        Cache key is namespaced by language: the default fetch tiers only request en/mul, so a
+        German surface-form lookup would otherwise get a stale en-only cache hit.
+        """
+        tier = f"la:{lang}"
+        out, missing = _split_cached(self._cache, qids, tier)
+        for i in range(0, len(missing), self.cfg.api_batch_size):
+            batch = missing[i : i + self.cfg.api_batch_size]
+            resolved = _resolved(self._api_get_entities(batch, "labels|aliases", lang))
+            self._cache.put_many({f"{tier}:{q}": e for q, e in resolved.items()})
+            out.update(resolved)
+        return out
 
     def close(self) -> None:
         self._client.close()
