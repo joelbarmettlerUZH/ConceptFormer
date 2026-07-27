@@ -1494,6 +1494,104 @@ def eval_transfer(
     rprint(f"[green]wrote[/] {out_dir}/summary.json")
 
 
+@app.command("eval-multilingual")
+def eval_multilingual(
+    checkpoint: Annotated[str, typer.Option(help="trained checkpoint name or path")],
+    qa: Annotated[str, typer.Option(help="TranslatedQA JSONL from translate-eval-set")],
+    snapshot: Annotated[str, typer.Option()] = "popqa_full",
+    benchmark: Annotated[str, typer.Option(help="report tag")] = "popqa_de",
+    mention: Annotated[str, typer.Option(help="en | localized")] = "en",
+    n: Annotated[int, typer.Option(help="questions to score (0 = all)")] = 0,
+    gen_batch: Annotated[int, typer.Option()] = 64,
+    max_new: Annotated[int, typer.Option()] = 32,
+    model: Annotated[str, typer.Option()] = "Qwen/Qwen3-0.6B",
+    device: Annotated[str, typer.Option()] = "cuda",
+) -> None:
+    """Cross-lingual eval: does concept injection help when the question is in another language?
+
+    Scores concept/base/RAG on a translated eval set (eval-only, English-trained encoder). The
+    ``mention`` flag picks whether the entity appears in English or its localized form. Accuracy
+    accepts an answer in EITHER language; the report additionally classifies which language each
+    correct concept answer was given in (en / localized / both), the second research question.
+    """
+    from conceptformer.data.multilingual import TranslatedQA, classify_answer_language
+    from conceptformer.data.snapshot import iter_subgraphs
+    from conceptformer.eval.stats import summarize_accuracy
+    from conceptformer.generate.signal import answer_ok
+    from conceptformer.train.trainer import TEACHER_SYSTEM
+    from conceptformer.verbalize import verbalize_budgeted
+
+    trainer, blob, chat = _load_trained_checkpoint(
+        checkpoint, model, device, use_generation_cache=True
+    )
+    sgs = {sg.center.qid: sg for sg in iter_subgraphs(settings.snapshots_dir / snapshot)}
+    rows = [
+        TranslatedQA.model_validate_json(line)
+        for line in Path(qa).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    rows = [r for r in rows if r.subject_qid in sgs]
+    if n:
+        rows = rows[:n]
+    picks = [(sgs[r.subject_qid],
+              r.question_localized if mention == "localized" else r.question_en_mention, r)
+             for r in rows]
+    rprint(f"[bold]multilingual[/] {checkpoint} -> {benchmark} (mention={mention}): "
+           f"n={len(picks)}")
+
+    concept_preds: list[str] = []
+    for i in range(0, len(picks), gen_batch):
+        chunk = picks[i : i + gen_batch]
+        concept_preds += trainer.generate_student_batch(
+            [(sg, q) for sg, q, _ in chunk], max_new, TEACHER_SYSTEM
+        )
+    base_preds = chat.generate_batch(
+        [(TEACHER_SYSTEM, q) for _, q, _ in picks], max_new_tokens=max_new, batch_size=gen_batch
+    )
+    budget = int(trainer.cfg.rag_context_tokens)
+    rag_preds = chat.generate_batch(
+        [(TEACHER_SYSTEM, f"{verbalize_budgeted(sg, chat.count_tokens, budget)}\n\n{q}")
+         for sg, q, _ in picks],
+        max_new_tokens=max_new, batch_size=gen_batch,
+    )
+
+    per_item, c_flags, b_flags, r_flags, langs = [], [], [], [], []
+    for (sg, q, r), cp, bp, rp in zip(picks, concept_preds, base_preds, rag_preds, strict=True):
+        gold = list(dict.fromkeys([*r.answer_labels_en, *r.answer_labels_localized]))
+        c_ok, b_ok, rag_ok = answer_ok(cp, gold), answer_ok(bp, gold), answer_ok(rp, gold)
+        lang = classify_answer_language(cp, r.answer_labels_en, r.answer_labels_localized)
+        c_flags.append(c_ok)
+        b_flags.append(b_ok)
+        r_flags.append(rag_ok)
+        if c_ok:
+            langs.append(lang)
+        per_item.append({"subject": sg.center.qid, "question": q, "gold": gold,
+                         "concept": c_ok, "base": b_ok, "rag": rag_ok,
+                         "concept_lang": lang, "concept_pred": cp})
+
+    lang_counts = {k: langs.count(k) for k in ("en", "localized", "both", "neither")}
+    report = {
+        "checkpoint": checkpoint, "benchmark": benchmark, "snapshot": snapshot,
+        "mention": mention, "lang": rows[0].lang if rows else "", "config": blob["config"],
+        "n": len(per_item),
+        "concept": summarize_accuracy(c_flags), "base": summarize_accuracy(b_flags),
+        "rag": summarize_accuracy(r_flags),
+        "answer_language_of_correct_concept": lang_counts,
+    }
+    out_dir = (settings.data_root / "analysis" / "multilingual"
+               / f"{checkpoint}__{benchmark}__{mention}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with (out_dir / "items.jsonl").open("w", encoding="utf-8") as fh:
+        for row in per_item:
+            fh.write(json.dumps(row) + "\n")
+    (out_dir / "summary.json").write_text(json.dumps(report, indent=2))
+    c, b, rg = report["concept"], report["base"], report["rag"]
+    rprint(f"  concept={c['acc']:.1%} [{c['ci95'][0]:.1%}, {c['ci95'][1]:.1%}]  "
+           f"base={b['acc']:.1%}  rag={rg['acc']:.1%}")
+    rprint(f"  answer language of correct concept answers: {lang_counts}")
+    rprint(f"[green]wrote[/] {out_dir}/summary.json")
+
+
 @app.command("eval-untrained-injection")
 def eval_untrained_injection(
     k: Annotated[int, typer.Option(help="concept slots to fill with top-k edge embeddings")] = 8,
