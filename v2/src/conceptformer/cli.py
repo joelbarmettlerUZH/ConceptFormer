@@ -1375,7 +1375,9 @@ def translate_eval_set(
             de_answer = wd.surface_forms(ans, lang)
 
     written = kept = 0
-    with Path(out).open("w", encoding="utf-8") as fh:
+    out_path = Path(out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8") as fh:
         for r, tr in zip(rows, results, strict=True):
             written += 1
             if tr is None:
