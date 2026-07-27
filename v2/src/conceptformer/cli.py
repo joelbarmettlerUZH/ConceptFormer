@@ -1318,6 +1318,33 @@ def build_metaqa_snapshot(
     rprint(f"[green]wrote[/] {out_dir} ({n} subgraphs, sha {sha.hexdigest()[:12]})")
 
 
+@app.command("build-worldcup-snapshot")
+def build_worldcup_snapshot(
+    kb: Annotated[str, typer.Option(help="path to WC2014.txt (subject<TAB>relation<TAB>object)")],
+    name: Annotated[str, typer.Option(help="snapshot name")] = "worldcup",
+) -> None:
+    """Convert the WorldCup2014 KB into a ConceptFormer snapshot (sports-domain transfer)."""
+    import hashlib
+
+    from conceptformer.data.worldcup import build_subgraphs
+
+    out_dir = settings.snapshots_dir / name
+    out_dir.mkdir(parents=True, exist_ok=True)
+    sha = hashlib.sha256()
+    n = 0
+    with Path(kb).open(encoding="utf-8") as kb_fh, \
+            (out_dir / "subgraphs.jsonl").open("w", encoding="utf-8") as fh:
+        for sg in build_subgraphs(kb_fh):
+            line = sg.model_dump_json()
+            fh.write(line + "\n")
+            sha.update(line.encode("utf-8"))
+            n += 1
+    manifest = {"name": name, "source": "WorldCup2014 / IRN (Zhou et al., COLING 2018)",
+                "n_subgraphs": n, "sha256": sha.hexdigest()}
+    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
+    rprint(f"[green]wrote[/] {out_dir} ({n} subgraphs, sha {sha.hexdigest()[:12]})")
+
+
 @app.command("build-localized-snapshot")
 def build_localized_snapshot(
     source: Annotated[str, typer.Option(help="English snapshot to relabel")] = "popqa_full",
@@ -1471,9 +1498,10 @@ def translate_eval_set(
 @app.command("eval-transfer")
 def eval_transfer(
     checkpoint: Annotated[str, typer.Option(help="trained checkpoint name or path")],
-    qa: Annotated[str, typer.Option(help="path to MetaQA-format QA file (bracketed subject)")],
+    qa: Annotated[str, typer.Option(help="path to the QA file for the chosen source")],
     snapshot: Annotated[str, typer.Option()] = "metaqa",
     benchmark: Annotated[str, typer.Option(help="benchmark tag for the report")] = "metaqa_1hop",
+    source: Annotated[str, typer.Option(help="QA loader: metaqa | worldcup")] = "metaqa",
     n: Annotated[int, typer.Option(help="questions to score (0 = all)")] = 2000,
     gen_batch: Annotated[int, typer.Option()] = 32,
     max_new: Annotated[int, typer.Option()] = 32,
@@ -1490,18 +1518,22 @@ def eval_transfer(
     """
     from conceptformer.data.metaqa import load_metaqa_qa
     from conceptformer.data.snapshot import iter_subgraphs
+    from conceptformer.data.worldcup import load_worldcup_qa
     from conceptformer.eval.evalsets import EVAL_SAMPLE_SEED, popqa_eval_items
     from conceptformer.eval.stats import summarize_accuracy
     from conceptformer.generate.signal import answer_ok
     from conceptformer.train.trainer import TEACHER_SYSTEM
     from conceptformer.verbalize import verbalize_budgeted
 
+    loaders = {"metaqa": load_metaqa_qa, "worldcup": load_worldcup_qa}
+    if source not in loaders:
+        raise typer.BadParameter(f"source must be one of {sorted(loaders)}, got {source!r}")
     trainer, blob, chat = _load_trained_checkpoint(
         checkpoint, model, device, use_generation_cache=True
     )
     sgs = {sg.center.qid: sg for sg in iter_subgraphs(settings.snapshots_dir / snapshot)}
     with Path(qa).open(encoding="utf-8") as qa_fh:
-        examples = load_metaqa_qa(qa_fh)
+        examples = loaders[source](qa_fh)
     items = popqa_eval_items(examples, sgs, n=n)  # frozen fixed-seed subset, pairable
     rprint(f"[bold]zero-shot transfer[/] {checkpoint} -> {benchmark}: n={len(items)} "
            f"(of {len(examples)} questions, {len(sgs)} entities in graph)")
