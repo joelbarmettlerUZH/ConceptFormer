@@ -1192,3 +1192,16 @@ zero-shot neighbor concepts, CE-on-first-gold objective, single recursion level,
 scaling (full corpus, label-free KL objective, iterated recursion to k-hop = a fixed-point
 graph embedder) is the proposed program. 3-hop MetaQA test staged (data/raw/metaqa/
 qa_test_3hop.txt) for the iterated-recursion follow-up.
+
+**F22 UPDATE (2026-07-27): warm-start + iterated recursion (2->3 hop).** From-scratch was
+data-starved. Warm-starting the main encoder from the 1-hop pc_k32_best and continuing training
+lifts 2-hop 0.115 -> 0.185 (init 0.059). Iterating one level -- save the 2-hop encoder's
+per-entity concepts as a C2 neighbor table, warm-start a 3-hop encoder from the 2-hop one, feed
+it C2 neighbors -- reaches 3-hop: init 0.266 -> peak 0.370 (step 3000) -> 0.343. Each level
+trains up; recursion depth enables hop reach (the user's graph-embedder vision, validated at PoC
+scale). CAVEAT: 3-hop > 2-hop is an ARTIFACT -- MetaQA 3-hop is aggregation-style (many accepted
+answers), so answer_ok is easier; levels are NOT on a comparable scale. Still grant-preliminary
+(CE not KL, k=1 neighbor bottleneck, Wikidata->MetaQA neighbor concepts, 10k, overfits past ~3k
+steps). Script scripts/recursive_hop.py (--init-encoder / --neighbor-table / --save-table chain);
+artifacts data/recursive/{e2,e3,c2}.pt (git-ignored). Proper version = Wikidata 2-hop corpus +
+label-free KL + shared-weight recursion (grant work package, not this paper).
