@@ -282,8 +282,9 @@ otherwise.
 
 Every configuration is scored between two conditions of the same frozen model: \textbf{base},
 the model without any knowledge, and \textbf{RAG}, the model reading the verbalized facts with
-the questioned edge guaranteed present. Base gives the floor and RAG gives the ceiling (0.96
-on \popqa{}). The metric is greedy exact match with word-boundary alias matching. We
+the questioned edge guaranteed present. Base gives the floor and RAG gives the ceiling. Both
+are backbone-specific; on \popqa{} the ceiling is 0.96 for the primary Qwen3-0.6B backbone
+and ranges from 0.82 (Gemma-3-270m) to 0.97 across the others. The metric is greedy exact match with word-boundary alias matching. We
 additionally report the official \popqa{} metric, which is more lenient and tracks ours within
 about 0.5\,pt.
 
@@ -351,13 +352,14 @@ trained gain, so the effect comes from the learned compression.
 \begin{figure}[t]
   \centering
   \includegraphics[width=\linewidth]{figures/fig_kcurves.png}
-  \caption{Token-budget curves at two corpus scales (3 seeds, identical protocol). Left:
-  strict held-out. Right: \popqa{}, with the 10k$\to$100k accuracy ratio annotated per $k$.}
+  \caption{Token-budget curves at two corpus scales (frozen Qwen3-0.6B, 3 seeds, identical
+  protocol). Left: strict held-out. Right: \popqa{}, with the 10k$\to$100k accuracy ratio
+  annotated per $k$.}
   \label{fig:kcurves}
 \end{figure}
 
-\paragraph{Token axis.} Accuracy is monotone in $k$ through $k{=}32$ on both corpora
-(Table~\ref{tab:kfamily}, Figure~\ref{fig:kcurves}). Returns per token diminish: $k{=}8$
+\paragraph{Token axis.} On the primary Qwen3-0.6B backbone, accuracy is monotone in $k$
+through $k{=}32$ on both corpora (Table~\ref{tab:kfamily}, Figure~\ref{fig:kcurves}). Returns per token diminish: $k{=}8$
 reaches about 89\% of the $k{=}32$ \popqa{} accuracy with a quarter of the tokens. The best
 budget therefore depends on how much context a deployment is willing to spend, and the curve
 shows no plateau up to $k{=}32$.
@@ -598,9 +600,10 @@ decide it.
 \paragraph{Limitations.} Training uses a single knowledge graph and a single language,
 English Wikidata. Only entity-valued relations are modeled, so literals such as dates and
 quantities are absent. Evaluation centers on \popqa{} and on held-out questions from the same
-generator, and the faithfulness probes cover single-fact questions. Cross-graph evaluation is
-zero-shot on one benchmark with one seed per $k$, and transfer with in-domain training is
-untested. Several 100k cells carry wide seed spreads (up to $\pm$4.4 points, on Qwen's
+generator. The token-budget curves, faithfulness probes, and cross-graph transfer cover only
+the primary Qwen3-0.6B backbone, and the probes cover single-fact questions. Cross-graph
+evaluation is zero-shot on one benchmark with one seed per $k$, and transfer with in-domain
+training is untested. Several 100k cells carry wide seed spreads (up to $\pm$4.4 points, on Qwen's
 larger backbones and Gemma's smaller ones), so their magnitudes are less settled than the
 stable cells. Corpora are teacher-relative, so cross-backbone comparisons
 involve each model's own curriculum. Knowledge is injected for one identified entity mention
