@@ -1165,3 +1165,30 @@ are fluent-but-wrong German (verified) -- not a pipeline bug.
 concepts flip output language but can't inject; only a strong multilingual backbone gives
 both. Multilingual concept vectors need TRAINING -> paper Outlook + grant WP. Paper S5.6
 (fig_multilingual, tab:multilingual). Data: data/analysis/multilingual/, HF results/multilingual/.
+
+---
+
+## Finding 22 — Recursive ConceptFormer is a learnable graph embedder (2-hop proof-of-concept) 🟡 (exploratory, grant-oriented; not paper-grade yet)
+
+**Idea (user's).** Represent each 1-hop edge's neighbor not by its label embedding but by the
+neighbor's own concept vector, so the encoder composes over compressed neighbor representations
+-> a learned graph embedder (message-passing through the concept bottleneck), not text
+compression. Recursing extends to k-hop.
+
+**Zero-shot: NO.** Feeding the 1-hop-trained pc_k* encoders concept-valued neighbor features
+(pooled k32, or purpose-built k=1, no pooling) on MetaQA 2-hop stays at/below the label floor:
+label floor k8 0.089 / k32 0.086, base 0.080; recursive pooled k8 0.096 / k32 0.067; recursive
+k1-neighbor main-k8 0.091 / main-k32 0.076. The encoder never learned to READ concept-valued
+neighbors; neighbor-summary quality is not the bottleneck (k=1 didn't help).
+
+**Trained: YES, modest.** scripts/recursive_2hop.py trains a fresh k=32 encoder (frozen k=1
+Wikidata neighbor encoder, recursive features, supervised CE on the MetaQA 2-hop gold answer,
+10k questions, 6k steps): 2-hop acc 0.043 -> 0.087 -> 0.103 -> 0.116 -> plateau 0.115 (eval
+n=2000). Clean learning curve, clears floor (~0.09) and base (0.08). Recursive composition IS
+learnable. Modest absolute number; bottlenecks: k=1 neighbor bottleneck, Wikidata->MetaQA
+zero-shot neighbor concepts, CE-on-first-gold objective, single recursion level, 10k scale.
+
+**Grant framing.** Preliminary evidence that recursive concept composition is learnable;
+scaling (full corpus, label-free KL objective, iterated recursion to k-hop = a fixed-point
+graph embedder) is the proposed program. 3-hop MetaQA test staged (data/raw/metaqa/
+qa_test_3hop.txt) for the iterated-recursion follow-up.
