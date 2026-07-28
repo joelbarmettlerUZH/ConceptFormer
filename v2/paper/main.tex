@@ -562,12 +562,12 @@ method rather than the target graph. Together with the probes of \S\ref{sec:prob
 supports the inductive claim: the encoder learned a mapping from labeled edges to concept
 tokens that generalizes beyond its training graph.
 
-Zero-shot transfer is a floor, not a ceiling: in-domain training captures much of the
-remaining gap. Fine-tuning the encoder on MetaQA's own 1-hop questions raises accuracy to
-0.648, against 0.335 zero-shot and a 0.921 RAG reference. We report this as evidence of
-adaptability rather than as a headline number, because this fine-tune used supervised
-cross-entropy rather than our label-free objective; label-free in-domain adaptation is
-straightforward and left to future work.
+Zero-shot transfer is a floor, not a ceiling: in-domain adaptation captures most of the
+remaining gap, and it needs no labels. Fine-tuning the encoder on MetaQA's own 1-hop
+questions with the same label-free KL objective (distilling the frozen model reading the
+verbalized facts) raises accuracy from 0.335 zero-shot to 0.658, against a 0.921 RAG
+reference. Adapting to a new graph is therefore cheap: the transferred encoder is a strong
+initialization, and a short label-free fine-tune closes most of the distance to text-RAG.
 
 \subsection{Ablations}
 

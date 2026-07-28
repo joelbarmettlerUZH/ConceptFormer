@@ -1216,3 +1216,13 @@ vs 0.335 zero-shot transfer). Then adapted 2-hop (init from k32_metaqa, C1_metaq
 2-hop 0.199 -> 3-hop 0.394; 3-hop>2-hop still the MetaQA aggregation artifact, not a real ladder.
 Artifacts data/recursive/{k1_metaqa,k32_metaqa,e2m,e3m,c1_metaqa,c2m}.pt. Grant-preliminary
 (CE, k=1 neighbor bottleneck, 10k, overfits past ~3k steps).
+
+**F22 UPDATE 3 (2026-07-28): in-domain 1-hop adaptation upgraded to label-free KL (paper-grade).**
+The CE fine-tune (0.648) is replaced by the actual method: label-free KL (distill teacher-reads-
+verbalized-facts), via trainer.prepare + step_prepared (the cf-train step), warm-started from
+pc_k32_best on MetaQA 1-hop. Result: init 0.337 -> 0.658 (step 3000 peak 0.662), matching CE
+and confirming in-domain adaptation reaches ~0.66 with NO labels vs 0.335 zero-shot, RAG 0.921.
+Now stated in S5.4 without the CE caveat: "transfer is a floor; cheap label-free in-domain
+adaptation closes most of the gap." recursive_hop.py --objective kl (hop 1); encoder saved
+data/recursive/k32_metaqa_kl.pt. Multi-hop KL remains future/grant (needs recursive features in
+prepare + 2-hop teacher paths).
