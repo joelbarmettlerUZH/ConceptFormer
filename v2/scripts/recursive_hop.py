@@ -45,7 +45,9 @@ from conceptformer.train.trainer import TEACHER_SYSTEM, ConceptTrainer, TrainCon
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--hop", type=int, default=2, choices=(2, 3))
+    ap.add_argument("--hop", type=int, default=2, choices=(1, 2, 3))
+    ap.add_argument("--objective", default="ce", choices=("ce", "kl"),
+                    help="ce = supervised gold; kl = label-free distill of teacher-reads-text")
     ap.add_argument("--steps", type=int, default=6000)
     ap.add_argument("--n-train", type=int, default=10000)
     ap.add_argument("--n-eval", type=int, default=2000)
@@ -83,19 +85,23 @@ def main() -> None:
 
     sgs = {sg.center.qid: sg for sg in iter_subgraphs(settings.snapshots_dir / "metaqa")}
     print(f"metaqa 1-hop entities: {len(sgs)}", flush=True)
-
-    # Neighbor concept table: C1 (from a frozen k=1 encoder) or a deeper table loaded from disk.
-    if args.neighbor_table == "pck1":
-        print("computing C1 neighbor table from the k=1 encoder…", flush=True)
-        nbr_trainer, _, _ = _load_trained_checkpoint(
-            args.neighbor_checkpoint, args.model, args.device
-        )
-        nbr_table = nbr_trainer.precompute_pooled_concepts(sgs.values())
-    else:
-        print(f"loading neighbor table {args.neighbor_table}…", flush=True)
-        nbr_table = torch.load(args.neighbor_table, map_location=args.device)
-
     hop = args.hop
+
+    # 1-hop = standard label-embedding neighbors (domain fine-tuning on MetaQA, no recursion).
+    # 2+ hop = recursive: neighbor half is a concept vector (C1 from a k=1 encoder, or a saved
+    # deeper table). Fine-tuning on 1-hop MetaQA first adapts the encoder to the movie domain so
+    # the multi-hop runs aren't also paying the Wikidata->MetaQA gap.
+    nbr_table: dict | None = None
+    if hop >= 2:
+        if args.neighbor_table == "pck1":
+            print("computing C1 neighbor table from the k=1 encoder…", flush=True)
+            nbr_trainer, _, _ = _load_trained_checkpoint(
+                args.neighbor_checkpoint, args.model, args.device
+            )
+            nbr_table = nbr_trainer.precompute_pooled_concepts(sgs.values())
+        else:
+            print(f"loading neighbor table {args.neighbor_table}…", flush=True)
+            nbr_table = torch.load(args.neighbor_table, map_location=args.device)
 
     def load(path: str, n: int) -> list:
         with Path(path).open(encoding="utf-8") as fh:
@@ -108,11 +114,16 @@ def main() -> None:
     test = load(str(base / f"qa_test_{hop}hop.txt"), args.n_eval)
     print(f"train {len(train)} / eval {len(test)} {hop}-hop questions", flush=True)
 
+    from conceptformer.model.featurizer import featurize_subgraph
+
     feat_cache: dict[str, object] = {}
 
     def feats(qid: str) -> object:
         if qid not in feat_cache:
-            feat_cache[qid] = featurize_subgraph_recursive(sgs[qid], bb.embed_labels, nbr_table)
+            feat_cache[qid] = (
+                featurize_subgraph(sgs[qid], bb.embed_labels) if nbr_table is None
+                else featurize_subgraph_recursive(sgs[qid], bb.embed_labels, nbr_table)
+            )
         return feat_cache[qid]
 
     def answer_ids(r: object) -> list[int]:
@@ -134,37 +145,68 @@ def main() -> None:
             )
         return correct / len(test)
 
-    print(f"init {hop}-hop acc: {evaluate():.3f}", flush=True)
     rng = random.Random(1)
-    for step in range(1, args.steps + 1):
-        main_trainer.model.train()
-        batch = rng.sample(train, args.batch)
-        concepts = main_trainer._encode_concepts([feats(r.subject_qid) for r in batch])
-        embeds, ctx, paths, ids_rows = [], [], [], []
-        for i, r in enumerate(batch):
-            path = answer_ids(r)
-            head, tail = main_trainer._student_split(
-                TEACHER_SYSTEM, r.question, sgs[r.subject_qid].center.label
-            )
-            emb, c, idr = main_trainer._student_row(head, tail, path, concepts[i])
-            embeds.append(emb)
-            ctx.append(c)
-            paths.append(path)
-            ids_rows.append(idr)
-        s_in, s_attn = pack_embeddings(embeds)
-        s_pos = main_trainer._student_positions(ids_rows, s_attn)
-        s_hidden = bb.forward_hidden(s_in, s_attn, s_pos)
-        plens = [len(p) for p in paths]
-        s_path, mask = gather_path_logits(s_hidden, ctx, plens)
-        logits = bb.lm_head(s_path).float()
-        targets = main_trainer._pad_targets(paths, mask.shape[1])
-        loss = sequence_cross_entropy(logits, targets, mask)
-        main_trainer._apply(loss)
-        if step % 200 == 0:
-            print(f"step {step}: loss {float(loss):.3f}", flush=True)
-        if step % args.eval_every == 0:
-            print(f"step {step}: {hop}-hop acc {evaluate():.3f}", flush=True)
-    print(f"FINAL {hop}-hop acc: {evaluate():.3f}", flush=True)
+    if args.objective == "kl":
+        # Label-free KL, the paper objective: distill the frozen teacher READING THE FACTS into
+        # the student reading concept tokens. The "target" is the teacher's own greedy path over
+        # the answer-guaranteed verbalized neighborhood (no gold label enters the loss), then
+        # trainer.prepare + step_prepared run the exact KL step cf-train uses. Hop 1 (label
+        # neighbors) only; deeper KL needs recursive features in prepare (future work).
+        print("decoding teacher paths (label-free target)…", flush=True)
+        tuples = []
+        for i in range(0, len(train), 64):
+            chunk = train[i : i + 64]
+            prompts = [
+                (TEACHER_SYSTEM,
+                 f"{main_trainer._facts(sgs[r.subject_qid], r.answer_labels[0])}\n\n{r.question}")
+                for r in chunk
+            ]
+            outs = main_trainer._generate_text_batch(prompts, 32)
+            for r, o in zip(chunk, outs, strict=True):
+                path = bb.tokenizer(o, add_special_tokens=False)["input_ids"]
+                if path:
+                    tuples.append((sgs[r.subject_qid], r.question, path, r.answer_labels[0]))
+        prepared = main_trainer.prepare(tuples)
+        print(f"prepared {len(prepared)} KL rows; init {hop}-hop acc: {evaluate():.3f}", flush=True)
+        for step in range(1, args.steps + 1):
+            main_trainer.model.train()
+            loss = main_trainer.step_prepared(rng.sample(prepared, args.batch))
+            if step % 200 == 0:
+                print(f"step {step}: loss {loss:.3f}", flush=True)
+            if step % args.eval_every == 0:
+                print(f"step {step}: {hop}-hop acc {evaluate():.3f}", flush=True)
+        print(f"FINAL {hop}-hop acc: {evaluate():.3f}", flush=True)
+    else:
+        print(f"init {hop}-hop acc: {evaluate():.3f}", flush=True)
+        for step in range(1, args.steps + 1):
+            main_trainer.model.train()
+            batch = rng.sample(train, args.batch)
+            concepts = main_trainer._encode_concepts([feats(r.subject_qid) for r in batch])
+            embeds, ctx, paths, ids_rows = [], [], [], []
+            for r in batch:
+                path = answer_ids(r)
+                head, tail = main_trainer._student_split(
+                    TEACHER_SYSTEM, r.question, sgs[r.subject_qid].center.label
+                )
+                emb, c, idr = main_trainer._student_row(head, tail, path, concepts[len(embeds)])
+                embeds.append(emb)
+                ctx.append(c)
+                paths.append(path)
+                ids_rows.append(idr)
+            s_in, s_attn = pack_embeddings(embeds)
+            s_pos = main_trainer._student_positions(ids_rows, s_attn)
+            s_hidden = bb.forward_hidden(s_in, s_attn, s_pos)
+            plens = [len(p) for p in paths]
+            s_path, mask = gather_path_logits(s_hidden, ctx, plens)
+            logits = bb.lm_head(s_path).float()
+            targets = main_trainer._pad_targets(paths, mask.shape[1])
+            loss = sequence_cross_entropy(logits, targets, mask)
+            main_trainer._apply(loss)
+            if step % 200 == 0:
+                print(f"step {step}: loss {float(loss):.3f}", flush=True)
+            if step % args.eval_every == 0:
+                print(f"step {step}: {hop}-hop acc {evaluate():.3f}", flush=True)
+        print(f"FINAL {hop}-hop acc: {evaluate():.3f}", flush=True)
 
     if args.save_encoder:
         torch.save(main_trainer.model.state_dict(), args.save_encoder)
