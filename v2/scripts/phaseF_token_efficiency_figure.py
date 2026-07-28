@@ -1,10 +1,10 @@
 """Token-efficiency figure: concept k-curve vs text-RAG budget curves (3 retrieval modes).
 
 Two panels (strict held-out questions, FULL PopQA unseen entities). x = knowledge tokens paid
-at inference (log scale); y = greedy exact-match accuracy. All curves come from the M7-corrected
-eval pipeline so both sides share eval sets:
-- concept curve = `scripts/aggregate_eval_final.py --out data/analysis/kfamily_corrected.json`
-  (strict held-out + full PopQA, mean +/- std over seeds);
+at inference (log scale); y = greedy exact-match accuracy. Both families are scored on the SAME
+300-item subset (the RAG budget curves' eval set):
+- concept curve = per-item eval_final dumps (pc_k*_{best,s1_best,s2_best}/{axis}_items.jsonl),
+  restricted to the RAG curves' item keys, mean +/- std over seeds;
 - RAG curves = data/analysis/rag_budget_curve_{pagerank,question,summary}.json
   (`cf-rag-budget-curve --retrieval ...`): query-independent truncation, query-AWARE retrieval,
   and LLM-written budgeted summaries — so the low-budget regime is not a strawman.
@@ -37,15 +37,36 @@ PANELS = [("held_out", "Held-out questions (strict, trained entities)"),
 
 
 def concept_curve() -> dict:
-    """{axis: {"mean": [...], "std": [...]}} from the corrected k-family aggregation."""
-    blob = json.loads((ANALYSIS / "kfamily_corrected.json").read_text())["table"]
+    """Concept accuracy on the SAME item subset the RAG budget curves use (matched eval sets).
+
+    The RAG curves score a 300-item eval subset; the full-PopQA concept dumps are restricted to
+    those exact items so the two families are directly comparable (no base-rate mismatch).
+    """
+    rag = json.loads((ANALYSIS / "rag_budget_curve_pagerank.json").read_text())
+    keysets = {axis: {(it["subject_qid"], it["question"]) for it in rag[f"{axis}_items"]}
+               for axis in ("held_out", "popqa")}
     out: dict = {}
-    for axis, field in (("held_out", "held_out"), ("popqa", "popqa")):
+    for axis in ("held_out", "popqa"):
+        keys = keysets[axis]
         means, stds = [], []
         for k in CONCEPT_K:
-            vals = blob[str(k)][field]
-            means.append(statistics.mean(vals))
-            stds.append(statistics.stdev(vals) if len(vals) > 1 else 0.0)
+            seed_accs = []
+            for seed in ("best", "s1_best", "s2_best"):
+                p = ANALYSIS / "eval_final" / f"pc_k{k}_{seed}" / f"{axis}_items.jsonl"
+                if not p.exists():
+                    continue
+                rows = [json.loads(ln) for ln in p.read_text().splitlines() if ln.strip()]
+                # Dedup by item key (PopQA lists ambiguous subjects as several rows) to match
+                # the RAG curves' item set one-to-one.
+                seen: dict[tuple[str, str], float] = {}
+                for r in rows:
+                    key = (r["subject_qid"], r["question"])
+                    if key in keys and key not in seen:
+                        seen[key] = float(r["concept"])
+                if seen:
+                    seed_accs.append(sum(seen.values()) / len(seen))
+            means.append(statistics.mean(seed_accs) if seed_accs else 0.0)
+            stds.append(statistics.stdev(seed_accs) if len(seed_accs) > 1 else 0.0)
         out[axis] = {"mean": means, "std": stds}
     return out
 

@@ -154,7 +154,14 @@ reference at k=32" oversells 0.658 vs 0.921 (26pt gap). main.tex:601. (R5, R7.)
   single-seed k=32 DE-label closure (17%) was a high outlier, 3-seed is 9+/-7% (near floor, cleaner).
   (Caught and corrected a mis-specified EN context in the first rerun; final uses EN-labels-DE-context.)
   1.7B/4B multilingual remain single-seed (only s0 checkpoints exist), noted in the caption.
-- B1/B2 placement: before_entity 10k k-curve retrain in progress (bm0ja2zrw), ~2 days.
+- M5 figure (fig:efficiency eval-set mismatch): the concept curve is now computed on the SAME
+  300-item subset as the RAG baselines (offline, from per-item dumps, dedup by key; matches the
+  reviewer's 0.466 at k=8). token_efficiency.png regenerated; caption states the matched set.
+- N8: tab:adaptation caption now states the 3 seeds are the Wikidata inits (adaptation deterministic).
+- N10 ("identical item sets" ~7-item cross-run drift): left as-is by decision -- within a single
+  eval-final run base/concept/RAG are on identical items, so McNemar pairing is valid; the drift
+  is across seed runs, not within a comparison.
+- B1/B2/N6/T3 placement + ratio: before_entity 10k k-curve retrain in progress (bm0ja2zrw), ~2 days.
 
 ## TRIVIA
 - T1 "14,230 questions" -> 14,229. main.tex:641,650. (R10.)

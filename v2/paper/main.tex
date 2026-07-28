@@ -321,7 +321,9 @@ Per-item outputs for every evaluation are released.
   \caption{Accuracy against knowledge tokens spent at inference (log scale), frozen
   Qwen3-0.6B, 100k-entity corpus, 3 seeds. Concept tokens are compared with three text
   baselines at the same token budget: top-PageRank truncation, question-aware retrieval, and
-  LLM-written summaries. Left: strict held-out. Right: \popqa{}.}
+  LLM-written summaries. All curves are scored on the same frozen 300-item eval subset per axis
+  (the text baselines verbalize facts without an answer guarantee). Left: strict held-out.
+  Right: \popqa{}.}
   \label{fig:efficiency}
 \end{figure}
 
@@ -579,7 +581,8 @@ graph, though only its low-capacity part transfers without adaptation.
 
 \begin{table}[t]
   \caption{In-domain adaptation on MetaQA-1hop (2{,}000-question eval split, 3 seeds,
-  mean$\pm$std). \emph{zero-shot} is the Wikidata-trained checkpoint before any MetaQA
+  mean$\pm$std; the seeds are the three Wikidata initializations, and the adaptation run itself
+  is deterministic). \emph{zero-shot} is the Wikidata-trained checkpoint before any MetaQA
   training; \emph{adapted} continues training the same encoder on MetaQA's own 1-hop questions
   with the label-free KL objective. No gold answer enters the loss.}
   \label{tab:adaptation}
