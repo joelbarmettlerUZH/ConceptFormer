@@ -79,18 +79,18 @@ with the user's actual task for the context window.
 ConceptFormer \citep{cfv1} proposed a third option: compress the knowledge-graph neighborhood
 itself into a few continuous tokens that a frozen language model consumes natively. The
 original system was validated on GPT-2 with rank-based metrics for next-token factual recall,
-and it left the decisive questions open. Rank-based scores cannot tell whether a model would
+and it left the central questions open. Rank-based scores cannot tell whether a model would
 actually generate a fact, because a gold answer among the top logits can still lose the greedy
-decode to a competing wrong one. Whether the model reads the injected structure, or merely
-absorbs it as an opaque signal, was never tested. And the expectation that injection, like
-soft prompting \citep{lester}, would benefit from larger frozen models remained a conjecture.
-ConceptFormer-2 measures all three. Does latent injection survive generative, exact-match
-question answering with a modern conversational model? Does the model read the injected
-graph? And what governs the value of this channel: the token budget, the amount of knowledge
-the encoder is trained on, or the size of the frozen model?
+decode to a competing wrong one. Whether the model reads the injected structure or treats it
+as an opaque signal was never tested. The expectation that injection, like soft prompting
+\citep{lester}, would benefit from larger frozen models also remained a conjecture.
+ConceptFormer-2 measures all three: whether latent injection holds under generative,
+exact-match question answering with a modern conversational model, whether the model reads the
+injected graph, and what governs the value of this channel among the token budget, the amount
+of knowledge the encoder is trained on, and the size of the frozen model.
 
-ConceptFormer-2 addresses these questions with a redesigned system. Three design changes
-matter most. The featurizer represents each graph edge with the frozen model's own label
+ConceptFormer-2 addresses these questions with a new design. It makes three changes. The
+featurizer represents each graph edge with the frozen model's own label
 embeddings instead of v1's per-entity lookup table, which makes the encoder inductive: an
 unseen entity needs only its labels. The training objective is label-free. The frozen model
 reading $k$ concept tokens is distilled toward the same frozen model reading the facts as
@@ -100,7 +100,7 @@ behaves identically to the frozen model.
 
 \paragraph{Contributions.}
 \textbf{(1)}~A latent knowledge-injection system for frozen instruction-tuned LLMs, evaluated
-with generative exact match on \popqa{} against strong text baselines and an
+with generative exact match on \popqa{} against text baselines and an
 untrained-injection control (\S\ref{sec:efficiency}).
 \textbf{(2)}~Matched scaling measurements along three axes: token budget, training-corpus
 size, and frozen-model size, repeated across two model families (Qwen3 and Gemma-3), showing
@@ -134,8 +134,8 @@ follow the graph-to-text encoding line \citep{talklikeagraph}.
 \citep{autocompressor} adapt the language model itself. ICAE \citep{icae} and 500xCompressor
 \citep{fivehundredx} train LoRA encoders against frozen decoders with reconstruction
 objectives, and CompLLM \citep{compllm} distills per-segment embeddings through activation
-matching. ARC-Encoder \citep{arcencoder} is the strongest recent text compressor for frozen
-decoders. IC-Former \citep{icformer} is architecturally the closest compressor: learnable
+matching. ARC-Encoder \citep{arcencoder} is a recent text compressor for frozen
+decoders. IC-Former \citep{icformer} is architecturally similar: learnable
 digest tokens cross-attend over the LLM's word embeddings in a small standalone encoder. A
 parallel personalization line builds reusable per-user embeddings with resamplers for frozen
 LLMs \citep{userllm,persoma}; these are per-entity soft tokens in structure, without graph
@@ -143,14 +143,14 @@ input and without label-free training. PISCO \citep{pisco} follows the same prin
 objective, distillation from
 a model that reads the uncompressed text, but implements it with sequence-level distillation
 on teacher-generated answers and LoRA-tunes both compressor and decoder. It reports that a
-frozen decoder clearly underperforms at document granularity; at entity granularity, our
-frozen decoder works well. The closest system is xRAG \citep{xrag}, which injects into the
+frozen decoder underperforms at document granularity; at entity granularity, a frozen decoder
+suffices (\S\ref{sec:efficiency}). The most directly comparable system is xRAG \citep{xrag}, which injects into the
 input embeddings of a frozen decoder and includes a KL term against the same model reading
 the text. Its training additionally relies on paraphrase pretraining and about one million
 labeled instruction examples. Its representation is a single pre-existing retriever embedding
 passed through a projector, which binds it to that embedding model at inference. Its
-evaluation covers aggregate QA accuracy and robustness to noisy retrieval, and it tests
-neither unseen-entity generalization nor what the compressed representation actually conveys.
+evaluation covers aggregate QA accuracy and robustness to noisy retrieval, and does not test
+unseen-entity generalization or the content of the compressed representation.
 Cartridges \citep{cartridges} distills each corpus into a trainable KV cache by gradient
 descent on self-generated conversations. This amortizes over the queries to one corpus, but
 there is no encoder, so a new corpus requires a fresh optimization run. The same
@@ -159,8 +159,9 @@ teacher-reads-text principle also appears outside the input space: prompt distil
 context distillation refines this in weight space \citep{disc}, and KV-Distill
 \citep{kvdistill} applies the KL objective to compress KV caches. A systematic study of
 gist-token compression \citep{gistsurvey} catalogs what such representations drop, including
-the counterfactual failures our probes target. None of these systems compress structured
-input, and none tests the compressed representation causally. Post-hoc overflow probing
+the counterfactual failures our probes target. These systems compress unstructured text and
+evaluate on task accuracy; none compresses structured input or probes the compressed
+representation causally. Post-hoc overflow probing
 \citep{overflow} is the nearest attempt.
 
 \paragraph{Knowledge-graph injection into LLMs.} GNP \citep{gnp} and G-Retriever
@@ -176,14 +177,15 @@ LLaGA \citep{llaga} projects frozen text-encoder features of a node's sampled ne
 into token space and is structurally the closest to per-entity encoding, but it rebuilds the
 sequence for every instance and targets node classification and link prediction rather than
 factual recall. All four keep the LLM frozen and train the encoder or projector on task
-labels. None of them computes entity tokens once and reuses them across arbitrary prompts.
-KBLaM \citep{kblam} precomputes one key--value pair per triple with a sentence encoder and
+labels. All four also recompute their graph representation for every question, so none
+produces reusable per-entity tokens.
+KBLaM \citep{kblam} precomputes one key-value pair per triple with a sentence encoder and
 learned adapters, injecting them into every attention layer through a modified attention with
 retrained query heads. New triples need only an encoder pass, but training requires
 supervised QA pairs, and on the one real knowledge base it is tested on, built from Enron
 emails, its accuracy degrades. SR-KI \citep{srki} scales the same recipe to tens of thousands
 of triples with a supervised attention loss; its per-triple latents are reusable, but
-training requires labeled QA and the injected units are flat triples rather than compressed
+training requires labeled QA, and it injects flat triples where ours are compressed
 neighborhoods. ReaLM \citep{realm} quantizes pretrained KG embeddings into discrete tokens in
 the LLM vocabulary for knowledge-graph completion, which trains the vocabulary and targets a
 different task. Knowledge Prompts \citep{knowledgeprompts} learns one soft
@@ -233,8 +235,8 @@ evaluation (\S\ref{sec:probes}) measures this decoupling directly.
 $d$. For an entity $e$ with 1-hop neighborhood $G_e = \{(p_i, n_i)\}_{i=1}^{N}$ (property and
 neighbor labels, PageRank-ordered), each edge becomes
 $x_i = [\,\phi(p_i);\phi(n_i)\,] \in \mathbb{R}^{2d}$, where $\phi$ mean-pools $M$'s input
-embeddings over a label's tokens. The features live in $M$'s own embedding space, and no
-per-entity parameters exist anywhere in the system.
+embeddings over a label's tokens. The features live in $M$'s own embedding space, and the
+system holds no per-entity parameters.
 
 \paragraph{Encoder.} The encoder is a latent-query resampler \citep{perceiver,flamingo}. In
 each of $L$ layers, $k$ learned queries cross-attend over the edge set (order-invariant,
@@ -258,21 +260,20 @@ is the token-level full-vocabulary KL \citep{hinton} along the stored path,
   \mathrm{KL}\!\left( p_M(\cdot \mid \text{facts}, q, y_{<t}) \,\|\,
                       p_M(\cdot \mid C_k(G_e), q, y_{<t}) \right).
 \end{equation}
-Only the roughly 20 path positions pass through the LM head, which keeps training light. One
-converged run fits a single 24\,GB consumer GPU. The corpus questions (generated by a separate
-LLM, described below) only give the teacher something to answer. No QA labels enter the loss.
+Only the roughly 20 path positions pass through the LM head, which cuts the per-step compute.
+One converged run fits a single 24\,GB GPU. The corpus questions (generated by a separate
+LLM, described below) serve only as inputs for the teacher. No QA labels enter the loss.
 
 \paragraph{Data.} From the Wikidata PageRank ranking we sample entity pools, excluding all
 \popqa{} subjects, and snapshot each entity's complete 1-hop neighborhood. A separate
 open-weights Gemma model generates questions from these neighborhoods. Each question is then
-tiered: it enters the corpus if the graph demonstrably helps the backbone, meaning the base
+tiered: it enters the corpus if the graph helps the backbone, meaning the base
 model fails the question and the model with the facts in context answers it (a 30\% sample of
 base-known questions is retained). Finally, we store the teacher's greedy answer paths. The
 corpora hold 10k entities ($92{,}177$ rows under the Qwen3-0.6B \citep{qwen} teacher) and
 100k entities ($925{,}178$ rows). Tiering and teacher paths depend on the backbone, so each
 backbone trains on its own corpus variant of near-identical size, and cross-backbone
-comparisons evaluate each model with its own curriculum. The same pipeline, applied
-unchanged, produces the corpora for the six backbones of the two model families we study
+comparisons evaluate each model with its own curriculum. The same pipeline produces the corpora for the six backbones of the two model families we study
 (Qwen3 0.6B/1.7B/4B and Gemma-3 270m/1b/4b \citep{gemma3}).
 
 \paragraph{Training.} AdamW with constant learning rate $10^{-4}$, weight decay $0.01$, and
@@ -286,9 +287,9 @@ otherwise.
 
 Every configuration is scored between two conditions of the same frozen model: \textbf{base},
 the model without any knowledge, and \textbf{RAG}, the model reading the verbalized facts with
-the questioned edge guaranteed present. Base gives the floor and RAG gives the ceiling. Both
+the questioned edge guaranteed present. Base gives the floor and RAG the ceiling. Both
 are backbone-specific; on \popqa{} the ceiling is 0.96 for the primary Qwen3-0.6B backbone
-and ranges from 0.82 (Gemma-3-270m) to 0.97 across the others. The metric is greedy exact match with word-boundary alias matching. We
+and stays above 0.82 across the other five. The metric is greedy exact match with word-boundary alias matching. We
 additionally report the official \popqa{} metric, which is more lenient and tracks ours within
 about 0.5\,pt.
 
@@ -305,7 +306,7 @@ Per-item outputs for every evaluation are released.
 
 \section{Results}
 
-\subsection{Token efficiency against strong text baselines}
+\subsection{Token efficiency against text baselines}
 \label{sec:efficiency}
 
 \begin{figure}[t]
@@ -324,7 +325,7 @@ that ranks facts by embedding similarity to the question, and LLM-written budget
 The question-aware baseline sees the question and can select the one relevant fact, an
 advantage the query-independent concept tokens do not have. On unseen entities at a budget of
 eight tokens, concept tokens reach 0.48 accuracy and the best text baseline reaches 0.15. The
-text baselines reach the same accuracy only with 64 to 128 fact tokens, so matched accuracy
+text baselines reach the same accuracy at 64 to 128 fact tokens, so matched accuracy
 costs text five to six times more tokens. An untrained control separates the encoder from the
 injection mechanism: filling the same $k$ slots with mean-pooled embeddings of the top-$k$
 edges lifts \popqa{} accuracy only from 0.103 to 0.130. The untrained slots recover 7\% of the
@@ -415,39 +416,37 @@ with its own teacher-relative corpus and brackets (Figure~\ref{fig:grid},
 Table~\ref{tab:grid}). A larger frozen model knows more of \popqa{} from its weights, so the
 grid asks whether it gains less from injection and whether more training data closes the gap.
 It gains less, and data does not close the gap. The 1.7B margin is roughly half the 0.6B
-margin at both corpus scales. The same $10\times$ data step multiplies the 0.6B margin
-$3.5\times$ and the 1.7B margin $2.1\times$. Headroom does not explain this: base accuracy
-moves only from 0.10 to 0.15 across the family and the RAG ceiling stays near 0.97, yet at
-100k entities the 0.6B closes 44\% of its base-to-RAG gap, the 4B closes 28\%, and the 1.7B
-closes 16\%.
+margin at both corpus scales, and the same $10\times$ data step multiplies the 0.6B margin far
+more than the 1.7B margin (data-gain column, Table~\ref{tab:grid}). Headroom does not explain
+this: base accuracy moves only from 0.10 to 0.15 across the family and the RAG ceiling stays
+near 0.97, yet at 100k entities the 0.6B closes 44\% of its base-to-RAG gap, the 4B closes
+28\%, and the 1.7B closes 16\%.
 
-Two observations sharpen the picture. The 1.7B held-out accuracy barely moves across the data
-step ($0.397 \to 0.418$) where the 0.6B gains 13 points. The encoder trains equally well on
-the bigger backbone, and what shrinks is specifically the payoff on unseen entities. And the
-axis is not monotone: the 4B margin exceeds the 1.7B margin at both corpus scales (+8.2 vs.\
-+6.2 at 10k, +22.5 vs.\ +13.0 at 100k), and its data gain of $2.7\times$ sits between the
-0.6B's $3.5\times$ and the 1.7B's $2.1\times$. The 1.7B is a valley of the model axis rather
-than a point on a decay. The teacher-relative curricula remain a candidate confound
+Two further results bear on the model axis. The 1.7B held-out accuracy barely moves across the
+data step ($0.397 \to 0.418$) where the 0.6B gains 13 points. The encoder trains equally well
+on the bigger backbone, and what shrinks is specifically the payoff on unseen entities. The
+axis is also non-monotone: the 4B margin exceeds the 1.7B margin at both corpus scales, and its
+data gain falls between those of the 0.6B and the 1.7B (Table~\ref{tab:grid}). The 1.7B is a
+local minimum of the model axis, and the 4B recovers. The teacher-relative curricula remain a candidate confound
 throughout, since a stronger base tiers a different question mix into its training corpus.
 
 A second model family tests how much of this is Qwen-specific. Across Gemma-3 backbones
 (Table~\ref{tab:grid}), the margin again roughly halves from the smallest model to the
 mid-size one at both corpus scales, and the smallest backbone in either family posts the
-largest margin. The mid-size dip also replicates in the data gain: Gemma's 1b multiplies its
-margin $1.3\times$ under $10\times$ data where its neighbors reach $1.6\times$, mirroring
-Qwen's $2.1\times$ valley between $3.5\times$ and $2.7\times$. The 4B recovery is clear in
+largest margin. The mid-size dip also replicates in the data gain: Gemma's 1b shows the smallest data gain in
+its family, mirroring the 1.7B valley in Qwen. The 4B recovery is clear in
 Qwen at both scales; in Gemma the 4b edges above the 1b only at 100k, and within noise.
 Gemma's data gains are uniformly smaller than Qwen's, so the value of additional training
 data itself depends on the family.
 
 \paragraph{Stability across scale.} Instability emerges at the larger corpus in both
 families, but on different backbones. Every 10k cell in either family is reproducible to
-within $\pm$0.8 points. At 100k, the seed spread reaches $\pm$1.9 and $\pm$4.2 on Qwen's two
-larger backbones and $\pm$4.4 and $\pm$2.3 on Gemma's two smaller ones, while Qwen3-0.6B and
-Gemma-3-4b stay within $\pm$0.6. Run-to-run variance is therefore not a monotone function of
-model size: it is a property of the backbone--corpus pair. Where it strikes, it swamps
-effects that stable cells resolve cleanly; doubling the 1.7B's token budget at 100k moves
-the mean margin from +13.0 to +15.1, less than the seed spread of either cell. Stabilizing
+within $\pm$0.8 points. At 100k, the seed spread balloons on Qwen's two
+larger backbones and Gemma's two smaller ones, while Qwen3-0.6B and Gemma-3-4b stay within
+$\pm$0.6 (std column, Table~\ref{tab:grid}). Run-to-run variance therefore tracks the specific
+backbone--corpus pair, not model size. Where variance is large it exceeds real effects:
+doubling the 1.7B's token budget at 100k lifts the mean margin to +15.1, less than the seed
+spread of either cell. Stabilizing
 the recipe per backbone is a prerequisite to measuring such effects at scale.
 
 \subsection{Causal probes of graph reading}
@@ -471,8 +470,8 @@ correlational: diagnostic probes on resampler tokens in vision-language systems
 \citep{breakingchain}. We instead intervene on the input graph of a trained model, re-encode
 it, and observe the answer.
 
-Edge ablation removes single edges. Removing the questioned edge collapses accuracy on that
-question, while removing an unrelated edge leaves it intact (Figure~\ref{fig:probes}, left).
+Edge ablation removes single edges. Removing the questioned edge drops accuracy on that
+question to near zero, while removing an unrelated edge leaves it intact (Figure~\ref{fig:probes}, left).
 The encoder stores edges separably.
 
 The counterfactual swap rewires the questioned edge to a type-plausible false neighbor. A
@@ -480,12 +479,12 @@ model that reads the graph follows the rewiring and produces the false answer. T
 swap-follow rate rises from about 1\% at $k{=}1$ to 33\% at $k{=}32$
 (Figure~\ref{fig:probes}, middle). The frozen base solves only 10\% of these probes from its
 weights, so parametric memory cannot explain the behavior. The model reads the injected
-graph, and it reads more of it as the token budget grows.
+graph, and reads more of it as the token budget grows.
 
 Injection leaves the model undisturbed elsewhere. On control tasks that mention the entity
 without asking about its facts, the median next-token KL between the model with and without
 concept tokens stays between 0.05 and 0.08 nats, flat in $k$ (Figure~\ref{fig:probes},
-right). Accuracy is also robust to prompt wording: across seven system prompts, \popqa{}
+right). Accuracy is also stable across prompt wording: across seven system prompts, \popqa{}
 accuracy of the $k{=}8$ model varies with a standard deviation of at most 1.1\,pt.
 
 \subsection{Zero-shot cross-graph transfer}
@@ -542,21 +541,20 @@ entities identified by their label strings. We map each relation to a natural-la
 member''; WorldCup ships its own inverse edges), encode each 1-hop neighborhood exactly as in
 \S\ref{sec:method}, and score the Wikidata-trained checkpoints unchanged.
 
-Injection transfers. The concept tokens reach 0.25 accuracy at $k{=}8$ on a graph the encoder
-has never seen, against a base of 0.058, and every budget clears the base by roughly three to
-four times (Table~\ref{tab:transfer}). Figure~\ref{fig:transfer} compares the two graphs on a
-common scale, as the share of the base-to-RAG gap that the concept tokens close. At $k{=}1$ the
-transferred and home curves coincide, both near 12\%, and through $k{\approx}4$ transfer
-captures roughly half to two-thirds of the home closure. Above that the two diverge: the home
-curve keeps climbing with $k$, to 51\% at $k{=}32$, while the transferred curve plateaus near
-20--23\% and its seed variance widens. The extra capacity that helps on Wikidata does not
-survive the graph swap. The high RAG reference (0.921) shows that the frozen model can answer in
-this domain when given text, so the remaining gap belongs to the transferred encoder. WorldCup
-shows the same shape on a second, unrelated domain: closure rises to about 20\% by $k{=}4$ and
-then flattens, and the two foreign graphs converge to nearly the same endpoint, about 20--23\%
-at $k{=}32$, roughly 40--45\% of the home-graph closure (Figure~\ref{fig:transfer}). That two
-disjoint domains reach the same transfer ceiling suggests it is a property of the method rather
-than the target graph. Together with the probes of \S\ref{sec:probes}, transfer supports the
+The concept tokens transfer to the unseen graph: they reach 0.25 accuracy at $k{=}8$ against a
+base of 0.058, and every budget clears the base by roughly three to four times
+(Table~\ref{tab:transfer}). Figure~\ref{fig:transfer} compares the two graphs on a common
+scale, as the share of the base-to-RAG gap that the concept tokens close. At small $k$ the
+transferred and home curves coincide, and through $k{\approx}4$ transfer captures roughly half
+to two-thirds of the home closure. Above that the two diverge: the home curve keeps climbing
+with $k$ while the transferred curve plateaus and its seed variance widens. The extra capacity
+that helps on Wikidata does not survive the graph swap. The high RAG reference shows that the
+frozen model can answer in this domain when given text, so the remaining gap belongs to the
+transferred encoder. WorldCup shows the same shape on a second, unrelated domain: closure rises
+through $k{\approx}4$, then flattens. The two foreign graphs converge to nearly the same
+endpoint, roughly 40--45\% of the home-graph closure (Figure~\ref{fig:transfer}). That two
+disjoint domains reach the same transfer ceiling suggests the ceiling is a property of the
+method, common across target graphs. Together with the probes of \S\ref{sec:probes}, transfer supports the
 inductive claim: the encoder learned a mapping from labeled edges to concept tokens that
 generalizes beyond its training graph, though only its low-capacity part transfers without
 adaptation.
@@ -593,18 +591,17 @@ adaptation.
   \label{fig:adaptation}
 \end{figure}
 
-Zero-shot transfer is a floor, not a ceiling: in-domain adaptation captures most of the
-remaining gap, and it needs no labels. Continuing to train the encoder on MetaQA's own 1-hop
-questions with the same label-free KL objective (distilling the frozen model reading the
-verbalized facts, with no gold answer in the loss) lifts every budget well above its zero-shot
-start (Table~\ref{tab:adaptation}, Figure~\ref{fig:adaptation}). The gain is more than a
-constant offset. Zero-shot, accuracy is nearly flat in $k$, around 0.2 across the sweep, as the
-extra concept tokens carry Wikidata-specific structure the movie graph cannot use. Adaptation
-recovers the token budget: adapted accuracy rises with $k$ from 0.266 at $k{=}1$ to 0.658 at
-$k{=}32$, against a 0.921 RAG reference, restoring the monotone $k$-curve of the home graph.
-Adapting to a new graph is therefore cheap and label-free. The transferred encoder is a strong
-initialization, and a short fine-tune on the target graph's own questions closes most of the
-distance to text-RAG while restoring the returns to capacity.
+In-domain adaptation lifts accuracy well above the zero-shot result, and it needs no labels.
+Continuing to train the encoder on MetaQA's own 1-hop questions with the same label-free KL
+objective (distilling the frozen model reading the verbalized facts, with no gold answer in the
+loss) lifts every budget well above its zero-shot start (Table~\ref{tab:adaptation},
+Figure~\ref{fig:adaptation}). The gain is more than a constant offset. Zero-shot, accuracy is
+nearly flat in $k$, around 0.2 across the sweep, as the extra concept tokens carry
+Wikidata-specific structure the movie graph cannot use. Adaptation recovers the token budget:
+adapted accuracy rises monotonically with $k$, approaching the RAG reference at $k{=}32$ and
+restoring the home-graph $k$-curve (Table~\ref{tab:adaptation}). Adapting to a new graph is
+therefore cheap and label-free. The transferred encoder is a useful initialization: a short
+fine-tune on the target graph's own questions closes most of the distance to text-RAG.
 
 \subsection{Ablations}
 
@@ -627,10 +624,10 @@ distance to text-RAG while restoring the returns to capacity.
   \end{tabular}
 \end{table}
 
-Table~\ref{tab:ablations} summarizes the design ablations. Encoder capacity peaks near 70M
-parameters, and the largest encoder is clearly worse at this training budget. Placement
-barely matters: prefix, before-entity, and after-entity cluster within noise, and only
-replacing the entity mention hurts. We adopt before-entity placement because it extends to
+Encoder capacity peaks near 70M
+parameters (Table~\ref{tab:ablations}), and the largest encoder is worse at this training
+budget. Placement has little effect: prefix, before-entity, and after-entity cluster within
+noise, and only replacing the entity mention hurts. We adopt before-entity placement because it extends to
 prompts with several entities. Prompt augmentation gives a small gain that is significant
 under pooled paired testing but varies across seeds. Re-sampling teacher distractors at each
 step has no effect at our context budget.
@@ -679,21 +676,21 @@ neither accuracy nor answer language, so we fix the system prompt to German.
   \end{tabular}
 \end{table}
 
-Accuracy is governed by the concept tokens' label language, not by the question or system
-language. English-labeled concepts recover 40--51\% of the base-to-RAG gap on German
+The concept tokens' label language determines accuracy; the question and system language do
+not. English-labeled concepts recover 40--51\% of the base-to-RAG gap on German
 questions at $k{\ge}8$ (0.6B), close to the English-question figure, while German-labeled
-concepts recover at most 17\%, near the no-injection floor, at every model size
+concepts sit near the no-injection floor at every model size
 (Figure~\ref{fig:multilingual}, left; Table~\ref{tab:multilingual}). The encoder, trained on
 English label embeddings, transfers across graphs but not across the label language: German
 label embeddings are out-of-distribution for it, and the frozen model falls back to fluent
 but wrong German.
 
 The label language does steer the \emph{output} language, most strongly on the smallest
-backbone (0.6B, $k{=}8$: 59\% German answers from German-labeled concepts vs.\ 25\% from
-English-labeled ones). This effect narrows as the frozen model grows: at 4B both conditions
-answer in German about 70\% of the time (Figure~\ref{fig:multilingual}, right), because a
-stronger multilingual backbone follows the question's language on its own. Serving a new
-language with both accuracy and native output therefore needs either a strong multilingual
+backbone (0.6B, $k{=}8$; Table~\ref{tab:multilingual}), where German-labeled concepts more than
+double the share of German answers. This effect narrows as the frozen model grows: at 4B both
+conditions answer in German about 70\% of the time (Figure~\ref{fig:multilingual}, right),
+because a stronger multilingual backbone follows the question's language on its own. Serving a
+new language with both accuracy and native output therefore needs either a capable multilingual
 backbone or an encoder trained on that language's labels.
 
 \section{Discussion}
@@ -711,13 +708,12 @@ pretraining saturation \citep{memorizeretrieve}. The completed grid rejects both
 monotone accounts. Headroom is nearly constant across the family, which rules out a pure
 ceiling effect, but the data gain does not decay monotonically either: it falls from
 $3.5\times$ at 0.6B to $2.1\times$ at 1.7B and recovers to $2.7\times$ at 4B
-(\S\ref{sec:scaling}), and the Gemma-3 family shows the same mid-scale dip. What no
-configuration escapes is instability at the larger corpus: in each family, at least one 100k
+(\S\ref{sec:scaling}), and the Gemma-3 family shows the same mid-scale dip. Every
+configuration shows instability at the larger corpus: in each family, at least one 100k
 cell carries a seed spread above $\pm$4 points, and which backbone is affected differs
 between the families. We read the two grids as evidence that the binding constraint on
-scaling up injection is training stability rather than headroom, with the mid-scale valley
-as the sharpest open question. Per-backbone recipe tuning is the experiment that would
-decide it.
+scaling up injection is training stability, and that the mid-scale valley is the least
+understood part. Per-backbone recipe tuning is the experiment that would decide it.
 
 \paragraph{Limitations.} Training uses a single knowledge graph and a single language,
 English Wikidata. Only entity-valued relations are modeled, so literals such as dates and
@@ -731,18 +727,18 @@ stable cells. Corpora are teacher-relative, so cross-backbone comparisons
 involve each model's own curriculum. Knowledge is injected for one identified entity mention
 per prompt, multi-entity composition is untested, and neighborhoods are 1-hop.
 
-\paragraph{Outlook.} Several extensions follow naturally. The encoder consumes embeddings,
+\paragraph{Outlook.} Several extensions are open. The encoder consumes embeddings,
 so multimodal knowledge such as entity images could enter through the same interface for
 natively multimodal frozen models, which is the subject of ongoing work. A multilingual
-encoder is a second clear direction: our encoder transfers across entities and across graphs,
+encoder is a second direction: our encoder transfers across entities and across graphs,
 but it is trained on English label embeddings and does not carry over to labels in another
 language (\S\ref{sec:multilingual}), so serving a new language well will require training the
-encoder on that language's labels rather than relying on transfer. A third direction turns the
+encoder on that language's labels. A third direction turns the
 encoder into a graph embedder: representing each edge's neighbor by its own concept vector
 instead of its label embedding, and iterating, lets a single operator compose information
 across hops. In preliminary supervised experiments this recursion learns to answer 2- and
 3-hop questions that single-hop concepts cannot, with warm-starting and in-domain fine-tuning
-both helping; a label-free version at scale is the natural next step. On the architecture side,
+both helping. A label-free version at scale remains to be tested. On the architecture side,
 injecting concept tokens into intermediate layers, in the spirit of deep prompt tuning
 \citep{ptuningv2}, remains unexplored.
 
@@ -750,11 +746,11 @@ injecting concept tokens into intermediate layers, in the spirit of deep prompt 
 
 A frozen, instruction-tuned language model can be grounded in a knowledge graph through a
 handful of learned continuous tokens. Eight tokens more than quadruple accuracy on unseen
-entities at a fraction of retrieval's context cost, causal probes show that the model reads
+entities at a fraction of retrieval's context cost. Causal probes indicate the model reads
 the injected graph, and the encoder transfers zero-shot to a graph it was never trained on.
 The injected margin shrinks as the frozen model grows, non-monotonically and in two model
-families, and training stability at scale emerges as the binding constraint, which makes the
-interaction of model scale and injection the central open question. All corpora,
+families, and training stability at scale is the binding constraint, which leaves the
+interaction of model scale and injection as the main open question. All corpora,
 checkpoints, and per-item evaluation outputs are released.
 
 \begin{ack}
