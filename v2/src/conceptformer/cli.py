@@ -1534,6 +1534,9 @@ def eval_transfer(
     neighbor_features: Annotated[
         str, typer.Option(help="edge neighbor half: label | concept (recursive 2-hop probe)")
     ] = "label",
+    neighbor_checkpoint: Annotated[
+        str, typer.Option(help="encoder for neighbor concepts (e.g. a k=1 encoder); '' = main")
+    ] = "",
     n: Annotated[int, typer.Option(help="questions to score (0 = all)")] = 2000,
     gen_batch: Annotated[int, typer.Option()] = 32,
     max_new: Annotated[int, typer.Option()] = 32,
@@ -1574,8 +1577,15 @@ def eval_transfer(
     # rather than its label embedding, so one extra hop is encoded with the join preserved.
     nbr_concepts = None
     if neighbor_features == "concept":
-        rprint(f"[dim]precomputing pooled concept vectors for {len(sgs)} entities…[/dim]")
-        nbr_concepts = trainer.precompute_pooled_concepts(sgs.values())
+        # Neighbor concepts can come from a separate encoder (e.g. a k=1 encoder, so each neighbor
+        # is one purpose-trained token with no pooling loss) while the main entity keeps its k.
+        nbr_trainer = trainer
+        if neighbor_checkpoint and neighbor_checkpoint != checkpoint:
+            rprint(f"[dim]loading neighbor encoder {neighbor_checkpoint}…[/dim]")
+            nbr_trainer, _, _ = _load_trained_checkpoint(neighbor_checkpoint, model, device)
+        rprint(f"[dim]precomputing neighbor concept vectors for {len(sgs)} entities "
+               f"(k={nbr_trainer.cfg.k})…[/dim]")
+        nbr_concepts = nbr_trainer.precompute_pooled_concepts(sgs.values())
     elif neighbor_features != "label":
         raise typer.BadParameter("neighbor-features must be 'label' or 'concept'")
 
@@ -1615,6 +1625,7 @@ def eval_transfer(
     report = {
         "checkpoint": checkpoint, "benchmark": benchmark, "snapshot": snapshot,
         "neighbor_features": neighbor_features,
+        "neighbor_checkpoint": neighbor_checkpoint or checkpoint,
         "eval_sample_seed": EVAL_SAMPLE_SEED, "config": blob["config"],
         "n": len(per_item),
         "concept": summarize_accuracy(concept_flags),

@@ -1226,3 +1226,24 @@ Now stated in S5.4 without the CE caveat: "transfer is a floor; cheap label-free
 adaptation closes most of the gap." recursive_hop.py --objective kl (hop 1); encoder saved
 data/recursive/k32_metaqa_kl.pt. Multi-hop KL remains future/grant (needs recursive features in
 prepare + 2-hop teacher paths).
+
+**F22 UPDATE 4 (2026-07-28): full k-sweep, 3 seeds -- label-free KL 1-hop adaptation, ALL k.**
+Ran the label-free KL adaptation for every k in {1,2,4,8,16,32}, warm-started from the three
+Wikidata seed checkpoints (pc_k{K}_best, pc_k{K}_s1_best, pc_k{K}_s2_best), 4000 steps, eval on
+the MetaQA 1-hop n=2000 split. Zero-shot (init) vs adapted (final), mean+/-std over 3 seeds:
+  k=1  .167+/-.003 -> .266+/-.007
+  k=2  .191+/-.015 -> .334+/-.043
+  k=4  .234+/-.013 -> .496+/-.037
+  k=8  .256+/-.037 -> .601+/-.010
+  k=16 .219+/-.040 -> .629+/-.011
+  k=32 .236+/-.088 -> .658+/-.009
+KEY FINDING: zero-shot transfer is nearly FLAT in k (~0.2 across the sweep) -- extra concept
+tokens carry Wikidata-specific structure the movie graph cannot exploit -- but in-domain
+adaptation RESTORES the monotone k-curve (rising to .658 at k=32, near RAG 0.921). Fine-tuning
+is not a constant offset; its benefit grows with k (+.10 at k=1 to +.42 at k=32). Zero-shot
+seed variance is large at high k (k=32 init .337/.198/.174), which is why the s0-only
+single-seed .335 in the original transfer table was the lucky seed; the main transfer figure is
+being re-run at 3 seeds (s0/s1/s2, full 9947 MetaQA + WorldCup) for error bars. Data:
+data/analysis/adaptation/metaqa_1hop_kl_3seed.json; figure scripts/cf2_figures.py -> fig_adaptation.
+S5.4 gains tab:adaptation + fig:adaptation. Command: recursive_hop.py --hop 1 --objective kl
+--k K --steps 4000 --n-eval 2000 --eval-every 4000 --init-encoder <ckpt>.

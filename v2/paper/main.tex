@@ -492,10 +492,10 @@ accuracy of the $k{=}8$ model varies with a standard deviation of at most 1.1\,p
 \label{sec:transfer}
 
 \begin{table}[t]
-  \caption{Zero-shot transfer to MetaQA-1hop (all $9{,}947$ test questions, one seed per
-  $k$). The Wikidata-trained checkpoints of Table~\ref{tab:kfamily} are evaluated without any
-  MetaQA training. RAG verbalizes the same neighborhoods under the same token budget, without
-  an answer guarantee.}
+  \caption{Zero-shot transfer to MetaQA-1hop (all $9{,}947$ test questions, 3 seeds,
+  mean$\pm$std). The Wikidata-trained checkpoints of Table~\ref{tab:kfamily} are evaluated
+  without any MetaQA training. RAG verbalizes the same neighborhoods under the same token
+  budget, without an answer guarantee.}
   \label{tab:transfer}
   \centering
   \small
@@ -504,12 +504,12 @@ accuracy of the $k{=}8$ model varies with a standard deviation of at most 1.1\,p
     condition & accuracy\\
     \midrule
     base (floor) & .058\\
-    $k{=}1$ & .161\\
-    $k{=}2$ & .162\\
-    $k{=}4$ & .240\\
-    $k{=}8$ & .235\\
-    $k{=}16$ & .244\\
-    $k{=}32$ & \textbf{.335}\\
+    $k{=}1$ & .159\,$\pm$.002\\
+    $k{=}2$ & .183\,$\pm$.018\\
+    $k{=}4$ & .228\,$\pm$.015\\
+    $k{=}8$ & .250\,$\pm$.034\\
+    $k{=}16$ & .216\,$\pm$.039\\
+    $k{=}32$ & .233\,$\pm$.088\\
     RAG (reference) & .921\\
     \bottomrule
   \end{tabular}
@@ -518,10 +518,11 @@ accuracy of the $k{=}8$ model varies with a standard deviation of at most 1.1\,p
 \begin{figure}[t]
   \centering
   \includegraphics[width=0.6\linewidth]{figures/fig_transfer.png}
-  \caption{Share of the base-to-RAG gap closed vs.\ $k$: the home graph (Wikidata/\popqa{}, 3
-  seeds) and two zero-shot foreign graphs, MetaQA (movies) and WorldCup2014 (sports), one
-  seed each (Wilson CIs). The two foreign graphs converge to $\sim$32\% closure at $k{=}32$,
-  about 60\% of the home-graph value.}
+  \caption{Share of the base-to-RAG gap closed vs.\ $k$: the home graph (Wikidata/\popqa{})
+  and two zero-shot foreign graphs, MetaQA (movies) and WorldCup2014 (sports). Three seeds
+  each; bars are $\pm$1 std. Zero-shot transfer tracks the home curve at small $k$ but
+  plateaus near 20--23\% while the home graph climbs to 51\%, so the returns to capacity above
+  $k{\approx}4$ are largely graph-specific.}
   \label{fig:transfer}
 \end{figure}
 
@@ -541,33 +542,69 @@ entities identified by their label strings. We map each relation to a natural-la
 member''; WorldCup ships its own inverse edges), encode each 1-hop neighborhood exactly as in
 \S\ref{sec:method}, and score the Wikidata-trained checkpoints unchanged.
 
-Injection transfers. At $k{=}32$, the concept tokens reach 0.335 accuracy on a graph the
-encoder has never seen, against a base of 0.058 (Table~\ref{tab:transfer}). Every $k$ beats
-the base under an item-paired McNemar test ($p < 10^{-10}$). Figure~\ref{fig:transfer}
-compares the two graphs on a common scale, as the share of the base-to-RAG gap that the
-concept tokens close. Zero-shot transfer retains roughly half of the home-graph gap closure
-at every $k$ above 1, and at $k{=}1$ the two curves coincide. The shape differs, though:
-where the home curve rises smoothly, the transferred curve rises in steps. The second token
-adds nothing zero-shot, accuracy plateaus from $k{=}4$ through $k{=}16$, and the next gain
-arrives only at $k{=}32$. Some of each capacity increment appears to carry
-Wikidata-specific refinement that does not survive the graph swap. The high RAG reference
-(0.921) shows that the frozen model can answer in this domain when given text, so the
-remaining gap belongs to the transferred encoder. WorldCup shows the same effect on a second,
-unrelated domain: gap closure rises from 13\% at $k{=}1$ to 31\% at $k{=}32$, and although its
-mid-range curve is noisier (single-seed checkpoints on a small graph), the two foreign graphs
-converge to nearly the same endpoint, about 31--32\% at $k{=}32$, roughly 60\% of the
-home-graph closure (Figure~\ref{fig:transfer}). That two disjoint domains reach the same
-budget-32 transfer accuracy suggests the high-budget transfer ceiling is a property of the
-method rather than the target graph. Together with the probes of \S\ref{sec:probes}, transfer
-supports the inductive claim: the encoder learned a mapping from labeled edges to concept
-tokens that generalizes beyond its training graph.
+Injection transfers. The concept tokens reach 0.25 accuracy at $k{=}8$ on a graph the encoder
+has never seen, against a base of 0.058, and every budget clears the base by roughly three to
+four times (Table~\ref{tab:transfer}). Figure~\ref{fig:transfer} compares the two graphs on a
+common scale, as the share of the base-to-RAG gap that the concept tokens close. At $k{=}1$ the
+transferred and home curves coincide, both near 12\%, and through $k{\approx}4$ transfer
+captures roughly half to two-thirds of the home closure. Above that the two diverge: the home
+curve keeps climbing with $k$, to 51\% at $k{=}32$, while the transferred curve plateaus near
+20--23\% and its seed variance widens. The extra capacity that helps on Wikidata does not
+survive the graph swap. The high RAG reference (0.921) shows that the frozen model can answer in
+this domain when given text, so the remaining gap belongs to the transferred encoder. WorldCup
+shows the same shape on a second, unrelated domain: closure rises to about 20\% by $k{=}4$ and
+then flattens, and the two foreign graphs converge to nearly the same endpoint, about 20--23\%
+at $k{=}32$, roughly 40--45\% of the home-graph closure (Figure~\ref{fig:transfer}). That two
+disjoint domains reach the same transfer ceiling suggests it is a property of the method rather
+than the target graph. Together with the probes of \S\ref{sec:probes}, transfer supports the
+inductive claim: the encoder learned a mapping from labeled edges to concept tokens that
+generalizes beyond its training graph, though only its low-capacity part transfers without
+adaptation.
+
+\begin{table}[t]
+  \caption{In-domain adaptation on MetaQA-1hop (2{,}000-question eval split, 3 seeds,
+  mean$\pm$std). \emph{zero-shot} is the Wikidata-trained checkpoint before any MetaQA
+  training; \emph{adapted} continues training the same encoder on MetaQA's own 1-hop questions
+  with the label-free KL objective. No gold answer enters the loss.}
+  \label{tab:adaptation}
+  \centering
+  \small
+  \begin{tabular}{lcc}
+    \toprule
+    $k$ & zero-shot & adapted\\
+    \midrule
+    1  & .167\,$\pm$.003 & .266\,$\pm$.007\\
+    2  & .191\,$\pm$.015 & .334\,$\pm$.043\\
+    4  & .234\,$\pm$.013 & .496\,$\pm$.037\\
+    8  & .256\,$\pm$.037 & .601\,$\pm$.010\\
+    16 & .219\,$\pm$.040 & .629\,$\pm$.011\\
+    32 & .236\,$\pm$.088 & \textbf{.658\,$\pm$.009}\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.6\linewidth]{figures/fig_adaptation.png}
+  \caption{In-domain adaptation restores the $k$-curve on the foreign graph. Zero-shot transfer
+  accuracy is nearly flat in $k$; a short label-free KL fine-tune on MetaQA's own questions
+  recovers the returns to capacity, reaching text-RAG's neighborhood at $k{=}32$. Three seeds
+  each; bars are $\pm$1 std.}
+  \label{fig:adaptation}
+\end{figure}
 
 Zero-shot transfer is a floor, not a ceiling: in-domain adaptation captures most of the
-remaining gap, and it needs no labels. Fine-tuning the encoder on MetaQA's own 1-hop
+remaining gap, and it needs no labels. Continuing to train the encoder on MetaQA's own 1-hop
 questions with the same label-free KL objective (distilling the frozen model reading the
-verbalized facts) raises accuracy from 0.335 zero-shot to 0.658, against a 0.921 RAG
-reference. Adapting to a new graph is therefore cheap: the transferred encoder is a strong
-initialization, and a short label-free fine-tune closes most of the distance to text-RAG.
+verbalized facts, with no gold answer in the loss) lifts every budget well above its zero-shot
+start (Table~\ref{tab:adaptation}, Figure~\ref{fig:adaptation}). The gain is more than a
+constant offset. Zero-shot, accuracy is nearly flat in $k$, around 0.2 across the sweep, as the
+extra concept tokens carry Wikidata-specific structure the movie graph cannot use. Adaptation
+recovers the token budget: adapted accuracy rises with $k$ from 0.266 at $k{=}1$ to 0.658 at
+$k{=}32$, against a 0.921 RAG reference, restoring the monotone $k$-curve of the home graph.
+Adapting to a new graph is therefore cheap and label-free. The transferred encoder is a strong
+initialization, and a short fine-tune on the target graph's own questions closes most of the
+distance to text-RAG while restoring the returns to capacity.
 
 \subsection{Ablations}
 
@@ -687,8 +724,8 @@ English Wikidata. Only entity-valued relations are modeled, so literals such as 
 quantities are absent. Evaluation centers on \popqa{} and on held-out questions from the same
 generator. The token-budget curves, faithfulness probes, and cross-graph transfer cover only
 the primary Qwen3-0.6B backbone, and the probes cover single-fact questions. Cross-graph
-evaluation is zero-shot on one benchmark with one seed per $k$, and transfer with in-domain
-training is untested. Several 100k cells carry wide seed spreads (up to $\pm$4.4 points, on Qwen's
+evaluation is zero-shot on two benchmarks (3 seeds each), with in-domain adaptation shown on
+MetaQA; both are 1-hop. Several 100k cells carry wide seed spreads (up to $\pm$4.4 points, on Qwen's
 larger backbones and Gemma's smaller ones), so their magnitudes are less settled than the
 stable cells. Corpora are teacher-relative, so cross-backbone comparisons
 involve each model's own curriculum. Knowledge is injected for one identified entity mention

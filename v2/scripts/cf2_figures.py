@@ -221,29 +221,37 @@ for k in KS:
         home_x.append(k)
         home_y.append(statistics.mean(vals))
         home_e.append(statistics.stdev(vals) if len(vals) > 1 else 0.0)
-mq_x, mq_y, mq_e = [], [], []
-for k in KS:
-    p = TRANSFER / f"pc_k{k}_best__metaqa_1hop_full" / "summary.json"
-    if not p.exists():
-        continue
-    d = json.loads(p.read_text())
-    c, b, r = d["concept"], d["base"], d["rag"]
-    mq_x.append(k)
-    mq_y.append(closure(c["acc"], b["acc"], r["acc"]))
-    # Single checkpoint: propagate the concept Wilson CI through the closure (brackets fixed).
-    half = (c["ci95"][1] - c["ci95"][0]) / 2
-    mq_e.append(100 * half / (r["acc"] - b["acc"]))
-wc_x, wc_y, wc_e = [], [], []
-for k in KS:
-    p = TRANSFER / f"pc_k{k}_best__worldcup_1hop" / "summary.json"
-    if not p.exists():
-        continue
-    d = json.loads(p.read_text())
-    c, b, r = d["concept"], d["base"], d["rag"]
-    wc_x.append(k)
-    wc_y.append(closure(c["acc"], b["acc"], r["acc"]))
-    half = (c["ci95"][1] - c["ci95"][0]) / 2
-    wc_e.append(100 * half / (r["acc"] - b["acc"]))
+def transfer_curve(benchmark: str) -> tuple[list[int], list[float], list[float]]:
+    """Gap closure per k, aggregated over trained seeds (s0=pc_k{k}_best, s1, s2).
+
+    Brackets (base/RAG) are seed-independent deterministic evals on the same set, so the
+    error bar is the across-seed stdev of concept closure; with one seed it falls back to
+    the concept Wilson CI propagated through the closure.
+    """
+    xs, ys, es = [], [], []
+    for k in KS:
+        dirs = [f"pc_k{k}_best", f"pc_k{k}_s1_best", f"pc_k{k}_s2_best"]
+        summaries = []
+        for name in dirs:
+            p = TRANSFER / f"{name}__{benchmark}" / "summary.json"
+            if p.exists():
+                summaries.append(json.loads(p.read_text()))
+        if not summaries:
+            continue
+        b, r = summaries[0]["base"], summaries[0]["rag"]
+        cls = [closure(d["concept"]["acc"], b["acc"], r["acc"]) for d in summaries]
+        xs.append(k)
+        ys.append(statistics.mean(cls))
+        if len(cls) > 1:
+            es.append(statistics.stdev(cls))
+        else:
+            half = (summaries[0]["concept"]["ci95"][1] - summaries[0]["concept"]["ci95"][0]) / 2
+            es.append(100 * half / (r["acc"] - b["acc"]))
+    return xs, ys, es
+
+
+mq_x, mq_y, mq_e = transfer_curve("metaqa_1hop_full")
+wc_x, wc_y, wc_e = transfer_curve("worldcup_1hop")
 fig4, ax = plt.subplots(figsize=(6.2, 4.0))
 ax.errorbar(home_x, home_y, yerr=home_e, fmt="o-", color=BLUE, capsize=3,
             label="Wikidata (home): PopQA, unseen entities")
@@ -262,6 +270,33 @@ ax.legend(fontsize=9, loc="upper left")
 fig4.tight_layout()
 fig4.savefig(OUT / "fig_transfer.png", dpi=150, bbox_inches="tight")
 print("wrote fig_transfer.png")
+
+# ---------------------------------- Fig 6b: in-domain adaptation restores the k-curve (MetaQA)
+ADAPT = ROOT / "data/analysis/adaptation/metaqa_1hop_kl_3seed.json"
+if ADAPT.exists():
+    a = json.loads(ADAPT.read_text())
+    aks = sorted(int(k) for k in a)
+    zs_y = [a[str(k)]["zeroshot_mean"] for k in aks]
+    zs_e = [a[str(k)]["zeroshot_std"] for k in aks]
+    ft_y = [a[str(k)]["finetuned_mean"] for k in aks]
+    ft_e = [a[str(k)]["finetuned_std"] for k in aks]
+    fig4b, axb = plt.subplots(figsize=(6.2, 4.0))
+    axb.errorbar(aks, ft_y, yerr=ft_e, fmt="D-", color=ORANGE, capsize=3,
+                 label="in-domain adapted (label-free KL)")
+    axb.errorbar(aks, zs_y, yerr=zs_e, fmt="o--", color=DARK, capsize=3,
+                 label="zero-shot transfer")
+    axb.set_xscale("log", base=2)
+    axb.set_xticks(aks, [str(k) for k in aks])
+    axb.set_xlabel("concept tokens $k$")
+    axb.set_ylabel("MetaQA 1-hop accuracy")
+    axb.set_title("Adaptation restores the $k$-curve: zero-shot is flat in $k$,\n"
+                  "label-free in-domain KL recovers the token budget", fontsize=10)
+    axb.set_ylim(0, 0.75)
+    axb.grid(True, alpha=0.25)
+    axb.legend(fontsize=9, loc="upper left")
+    fig4b.tight_layout()
+    fig4b.savefig(OUT / "fig_adaptation.png", dpi=150, bbox_inches="tight")
+    print("wrote fig_adaptation.png")
 
 # ------------------------------------------ Fig 7: cross-lingual (German) label-language effect
 ML = ROOT / "data/analysis/multilingual"
