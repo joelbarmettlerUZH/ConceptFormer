@@ -263,8 +263,8 @@ ax.set_xscale("log", base=2)
 ax.set_xticks(KS, [str(k) for k in KS])
 ax.set_xlabel("concept tokens $k$")
 ax.set_ylabel("base$\\rightarrow$RAG gap closed (%)")
-ax.set_title("Same encoder, three graphs: two foreign graphs converge\nto "
-             "$\\sim$32% gap closure at $k$=32", fontsize=10)
+ax.set_title("Same encoder, three graphs: zero-shot transfer plateaus near\n"
+             "20-23% gap closure, vs. 51% on the home graph", fontsize=10)
 ax.grid(True, alpha=0.25)
 ax.legend(fontsize=9, loc="upper left")
 fig4.tight_layout()
