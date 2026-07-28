@@ -562,6 +562,13 @@ method rather than the target graph. Together with the probes of \S\ref{sec:prob
 supports the inductive claim: the encoder learned a mapping from labeled edges to concept
 tokens that generalizes beyond its training graph.
 
+Zero-shot transfer is a floor, not a ceiling: in-domain training captures much of the
+remaining gap. Fine-tuning the encoder on MetaQA's own 1-hop questions raises accuracy to
+0.648, against 0.335 zero-shot and a 0.921 RAG reference. We report this as evidence of
+adaptability rather than as a headline number, because this fine-tune used supervised
+cross-entropy rather than our label-free objective; label-free in-domain adaptation is
+straightforward and left to future work.
+
 \subsection{Ablations}
 
 \begin{table}[t]
@@ -693,7 +700,12 @@ natively multimodal frozen models, which is the subject of ongoing work. A multi
 encoder is a second clear direction: our encoder transfers across entities and across graphs,
 but it is trained on English label embeddings and does not carry over to labels in another
 language (\S\ref{sec:multilingual}), so serving a new language well will require training the
-encoder on that language's labels rather than relying on transfer. On the architecture side,
+encoder on that language's labels rather than relying on transfer. A third direction turns the
+encoder into a graph embedder: representing each edge's neighbor by its own concept vector
+instead of its label embedding, and iterating, lets a single operator compose information
+across hops. In preliminary supervised experiments this recursion learns to answer 2- and
+3-hop questions that single-hop concepts cannot, with warm-starting and in-domain fine-tuning
+both helping; a label-free version at scale is the natural next step. On the architecture side,
 injecting concept tokens into intermediate layers, in the spirit of deep prompt tuning
 \citep{ptuningv2}, remains unexplored.
 
