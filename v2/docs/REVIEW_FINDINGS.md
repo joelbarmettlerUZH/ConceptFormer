@@ -145,6 +145,17 @@ reference at k=32" oversells 0.658 vs 0.921 (26pt gap). main.tex:601. (R5, R7.)
 - N10 [reword] Base bracket not bit-identical across runs (~7-item greedy drift); soften "identical
   item sets". (R8.)
 
+## RESOLVED BY RERUNS (2026-07-28)
+- M3 naive-label transfer: re-ran MetaQA transfer with naive underscore->space labels (snapshot
+  metaqa_naive, 3 seeds). Transfer holds: k=8 0.219+/-.031 vs 0.250 hand-written, all k well above
+  base 0.058. Not an artifact of the label map. Stated in S5.4.
+- M10 cross-lingual single-seed: re-ran the 0.6B EN- and DE-label conditions at s1/s2 (3 seeds).
+  tab:multilingual 0.6B rows + fig_multilingual now carry error bars. Headline holds; the
+  single-seed k=32 DE-label closure (17%) was a high outlier, 3-seed is 9+/-7% (near floor, cleaner).
+  (Caught and corrected a mis-specified EN context in the first rerun; final uses EN-labels-DE-context.)
+  1.7B/4B multilingual remain single-seed (only s0 checkpoints exist), noted in the caption.
+- B1/B2 placement: before_entity 10k k-curve retrain in progress (bm0ja2zrw), ~2 days.
+
 ## TRIVIA
 - T1 "14,230 questions" -> 14,229. main.tex:641,650. (R10.)
 - T2 1.7B held-out "0.397 -> 0.418" -> 0.414. main.tex:426. (R10.)

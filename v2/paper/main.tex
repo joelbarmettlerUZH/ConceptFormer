@@ -554,9 +554,10 @@ MetaQA two mapped relation labels (``cast member'', ``genre'') coincide with Wik
 labels; WorldCup's relation vocabulary is disjoint. We map each relation to a natural-language
 label (MetaQA needs hand-written reverse readings, e.g.\ \texttt{starred\_actors} becomes ``cast
 member''; WorldCup ships its own inverse edges); this map is a design choice, and transfer
-holds under a naive \texttt{underscore}-to-space mapping of the MetaQA relations. We encode each
-1-hop neighborhood exactly as in \S\ref{sec:method} and score the Wikidata-trained checkpoints
-unchanged.
+holds under a naive \texttt{underscore}-to-space mapping of the MetaQA relations (0.219 vs 0.250
+accuracy at $k{=}8$, 3 seeds), so it is not an artifact of the hand-written labels. We encode
+each 1-hop neighborhood exactly as in \S\ref{sec:method} and score the Wikidata-trained
+checkpoints unchanged.
 
 The concept tokens transfer to the unseen graph: they reach 0.25 accuracy at $k{=}8$ against a
 base of 0.058, clearing the base at every budget (Table~\ref{tab:transfer}). Figure~\ref{fig:transfer} compares the two graphs on a common
@@ -676,7 +677,8 @@ neither accuracy nor answer language, so we fix the system prompt to German.
   \caption{German PopQA by concept label language (German system prompt, localized mention).
   Accuracy is base$\to$RAG gap closure; ``DE ans.'' is the fraction of correct answers given
   in German among those whose German and English forms differ. English-question home closure
-  is shown for reference.}
+  is shown for reference. The 0.6B rows are 3 seeds (mean$\pm$std); the 1.7B and 4B rows are a
+  single seed.}
   \label{tab:multilingual}
   \centering
   \small
@@ -686,8 +688,8 @@ neither accuracy nor answer language, so we fix the system prompt to German.
     \cmidrule(lr){2-3}\cmidrule(lr){4-5}
     & closure & DE ans. & closure & DE ans. & closure\\
     \midrule
-    0.6B $k{=}8$ & 40\% & 25\% & 8\% & 59\% & 44\%\\
-    0.6B $k{=}32$ & 51\% & 18\% & 17\% & 58\% & 51\%\\
+    0.6B $k{=}8$ & 42$\pm$2\% & 22$\pm$3\% & 10$\pm$2\% & 67$\pm$7\% & 44\%\\
+    0.6B $k{=}32$ & 50$\pm$2\% & 23$\pm$6\% & 9$\pm$7\% & 60$\pm$1\% & 51\%\\
     1.7B $k{=}8$ & 13\% & 56\% & 1\% & 52\% & --\\
     4B $k{=}8$ & 34\% & 70\% & 7\% & 74\% & --\\
     \bottomrule
@@ -695,8 +697,8 @@ neither accuracy nor answer language, so we fix the system prompt to German.
 \end{table}
 
 The concept tokens' label language determines accuracy; the question and system language do
-not. English-labeled concepts recover 40--51\% of the base-to-RAG gap on German
-questions at $k{\ge}8$ (0.6B), close to the English-question figure, while German-labeled
+not. English-labeled concepts recover 42--50\% of the base-to-RAG gap on German
+questions at $k{\ge}8$ (0.6B, 3 seeds), close to the English-question figure, while German-labeled
 concepts sit near the no-injection floor at every model size
 (Figure~\ref{fig:multilingual}, left; Table~\ref{tab:multilingual}). The encoder, trained on
 English label embeddings, transfers across graphs but not across the label language: German

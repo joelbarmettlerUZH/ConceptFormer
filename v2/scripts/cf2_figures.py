@@ -302,32 +302,53 @@ if ADAPT.exists():
 ML = ROOT / "data/analysis/multilingual"
 
 
-def ml_cell(pattern: str) -> tuple[float, float] | None:
-    """(gap-closed %, %German of distinguishable answers) for the one summary matching pattern."""
-    hits = list(ML.glob(f"{pattern}/summary.json"))
-    if not hits:
-        return None
-    d = json.loads(hits[0].read_text())
-    c, b, r = d["concept"]["acc"], d["base"]["acc"], d["rag"]["acc"]
-    lg = d["answer_language_of_correct_concept"]
-    dist = lg["en"] + lg["localized"]
-    return 100 * (c - b) / (r - b), (100 * lg["localized"] / dist if dist else 0.0)
+def ml_cell(*patterns: str) -> tuple[float, float] | None:
+    """(gap-closed %, %German of distinguishable answers) for the first summary that matches."""
+    for pattern in patterns:
+        hits = list(ML.glob(f"{pattern}/summary.json"))
+        if hits:
+            d = json.loads(hits[0].read_text())
+            c, b, r = d["concept"]["acc"], d["base"]["acc"], d["rag"]["acc"]
+            lg = d["answer_language_of_correct_concept"]
+            dist = lg["en"] + lg["localized"]
+            return 100 * (c - b) / (r - b), (100 * lg["localized"] / dist if dist else 0.0)
+    return None
 
 
-def en_label_06b(k: int) -> tuple[float, float] | None:  # DE system, EN labels, 0.6B
+def ml_seeds(seed_patterns: list[list[str]]) -> list[tuple[float, float]]:
+    """Collect (closure, de-ans) across seeds; each seed given as a fallback list of patterns."""
+    return [v for pats in seed_patterns if (v := ml_cell(*pats)) is not None]
+
+
+def agg(cells: list[tuple[float, float]], idx: int) -> tuple[float, float]:
+    vals = [c[idx] for c in cells]
+    return statistics.mean(vals), (statistics.stdev(vals) if len(vals) > 1 else 0.0)
+
+
+def en_seeds_06b(k: int) -> list[list[str]]:  # EN labels, DE system, 0.6B, 3 seeds
+    s0 = [f"pc_k{k}_best__popqa_desys_enlabels_0.6b_k{k}__localized__sys-de"]
     if k == 8:
-        return ml_cell("pc_k8_best__popqa_abl_enlabels_desys__localized__sys-de")
-    return ml_cell(f"pc_k{k}_best__popqa_desys_enlabels_0.6b_k{k}__localized__sys-de")
+        s0.append("pc_k8_best__popqa_abl_enlabels_desys__localized__sys-de")
+    return [s0,
+            [f"pc_k{k}_s1_best__popqa_desys_enlabels_0.6b_k{k}__localized__sys-de"],
+            [f"pc_k{k}_s2_best__popqa_desys_enlabels_0.6b_k{k}__localized__sys-de"]]
+
+
+def de_seeds_06b(k: int) -> list[list[str]]:  # DE labels, DE system, 0.6B, 3 seeds
+    return [[f"pc_k{k}_best__popqa_fullde_0.6b_k{k}__localized__sys-de"],
+            [f"pc_k{k}_s1_best__popqa_fullde_0.6b_k{k}__localized__sys-de"],
+            [f"pc_k{k}_s2_best__popqa_fullde_0.6b_k{k}__localized__sys-de"]]
 
 
 fig5, (axa, axb) = plt.subplots(1, 2, figsize=(11, 4.0))
-# Panel A: accuracy (gap closure) vs k at 0.6B, English vs German concept labels.
+# Panel A: accuracy (gap closure) vs k at 0.6B, English vs German concept labels (3 seeds).
 xs = KS
-en = [en_label_06b(k) for k in KS]
-de = [ml_cell(f"pc_k{k}_best__popqa_fullde_0.6b_k{k}__localized__sys-de") for k in KS]
-axa.plot(xs, [v[0] if v else None for v in en], "o-", color=BLUE, label="English-labeled concepts")
-axa.plot(xs, [v[0] if v else None for v in de], "s--", color=ORANGE,
-         label="German-labeled concepts")
+en = [ml_seeds(en_seeds_06b(k)) for k in KS]
+de = [ml_seeds(de_seeds_06b(k)) for k in KS]
+axa.errorbar(xs, [agg(v, 0)[0] for v in en], yerr=[agg(v, 0)[1] for v in en], fmt="o-",
+             color=BLUE, capsize=3, label="English-labeled concepts")
+axa.errorbar(xs, [agg(v, 0)[0] for v in de], yerr=[agg(v, 0)[1] for v in de], fmt="s--",
+             color=ORANGE, capsize=3, label="German-labeled concepts")
 axa.set_xscale("log", base=2)
 axa.set_xticks(KS, [str(k) for k in KS])
 axa.set_xlabel("concept tokens $k$")
@@ -337,19 +358,18 @@ axa.set_title("German questions, Qwen3-0.6B: accuracy follows\nthe concept label
 axa.grid(True, alpha=0.25)
 axa.legend(fontsize=9)
 # Panel B: %German answers vs model size at k8, English vs German concept labels.
+# 0.6B is 3-seed (error bar); 1.7B/4B are single seed.
 sizes = ["0.6B", "1.7B", "4B"]
-en_k8 = [
-    en_label_06b(8),
-    ml_cell("q3b17_100k_k8_s0_best__popqa_desys_enlabels_1.7b_k8__localized__sys-de"),
-    ml_cell("q3b4_100k_k8_s0_best__popqa_desys_enlabels_4b_k8__localized__sys-de"),
-]
-de_k8 = [ml_cell("pc_k8_best__popqa_fullde_0.6b_k8__localized__sys-de"),
-         ml_cell("q3b17_100k_k8_s0_best__popqa_fullde_1.7b_k8__localized__sys-de"),
-         ml_cell("q3b4_100k_k8_s0_best__popqa_fullde_4b_k8__localized__sys-de")]
-axb.plot(sizes, [v[1] if v else None for v in en_k8], "o-", color=BLUE,
-         label="English-labeled concepts")
-axb.plot(sizes, [v[1] if v else None for v in de_k8], "s--", color=ORANGE,
-         label="German-labeled concepts")
+en_k8 = [agg(ml_seeds(en_seeds_06b(8)), 1),
+         (ml_cell("q3b17_100k_k8_s0_best__popqa_desys_enlabels_1.7b_k8__localized__sys-de")[1], 0),
+         (ml_cell("q3b4_100k_k8_s0_best__popqa_desys_enlabels_4b_k8__localized__sys-de")[1], 0)]
+de_k8 = [agg(ml_seeds(de_seeds_06b(8)), 1),
+         (ml_cell("q3b17_100k_k8_s0_best__popqa_fullde_1.7b_k8__localized__sys-de")[1], 0),
+         (ml_cell("q3b4_100k_k8_s0_best__popqa_fullde_4b_k8__localized__sys-de")[1], 0)]
+axb.errorbar(sizes, [v[0] for v in en_k8], yerr=[v[1] for v in en_k8], fmt="o-", color=BLUE,
+             capsize=3, label="English-labeled concepts")
+axb.errorbar(sizes, [v[0] for v in de_k8], yerr=[v[1] for v in de_k8], fmt="s--", color=ORANGE,
+             capsize=3, label="German-labeled concepts")
 axb.set_ylim(0, 100)
 axb.set_xlabel("frozen backbone")
 axb.set_ylabel("answers given in German (% of distinguishable)")
