@@ -69,18 +69,21 @@
 \section*{Proposal Description (max. 2 A4 pages)}
 
 \subsection*{a. Purpose of the Swiss AI Initiative Small Project}
-Open language models such as Apertus store what they know inside their weights. That knowledge is
-hard to update, and the models answer unreliably about the many entities that appear only rarely
-in their training data \cite{emptyshelves}. The common remedy, retrieval-augmented generation,
-keeps the knowledge outside the model and places it in the prompt as text; a single entity's
-facts occupy on the order of a hundred context tokens, paid again on every query.
+Open language models such as Apertus answer questions about well-known entities from their
+weights, but fail on the long tail: the many people, places, and works that appear only rarely
+in their training data \cite{emptyshelves}. A large share of exactly this knowledge already
+exists in curated, structured form. Wikidata, a public-domain knowledge graph, describes over a
+hundred million entities and their relations. Today the only practical way to hand a model this
+knowledge is to rewrite the relevant part of the graph as text and place it in the prompt,
+which flattens the graph into prose and spends on the order of a hundred context tokens per
+entity, on every query.
 
-We develop a more compact carrier for the same knowledge. For an entity in a public knowledge
-graph such as Wikidata, a small trainable encoder compresses the entity's immediate graph
-neighborhood, its relations and neighboring entities, into a few continuous \emph{concept
-tokens} that the frozen model reads in place of the facts written out as text. The tokens are
-computed once per entity and reused across prompts, and the knowledge they carry is
-attributable: they are built from nothing but the entity's citable Wikidata edges.
+ConceptFormer grounds the model in the graph itself. A small trainable encoder reads an
+entity's immediate neighborhood, the nodes and edges around it, as graph structure and
+compresses it into a few continuous \emph{concept tokens} that the frozen model consumes
+natively, with no textification step in between. The tokens are computed once per entity and
+reused across prompts, and the knowledge they carry is attributable: they are built from
+nothing but the entity's citable Wikidata edges.
 
 Our published work established that the idea works: ConceptFormer won the \textbf{best paper
 award} of its workshop at The Web Conference 2026 \cite{cfv1}, and a follow-up study, prepared
@@ -93,8 +96,9 @@ entities, works across languages, and answers multi-hop questions.
 \emph{What we have already shown.} In two rounds of work we have taken the idea from proposal to a
 validated method. It is efficient: on questions about entities the encoder never saw in
 training, eight concept tokens match the accuracy of text baselines that spend five to six times
-more tokens. It is faithful: when we rewire an edge in the graph and re-encode, the model's
-answer follows the change at a rate that grows with the token budget, the causal test that
+more tokens. It preserves the graph: when we rewire a single edge in the neighborhood and
+re-encode, the model's answer follows the change at a rate that grows with the token budget,
+evidence that the structure survives compression and that the model reads it, the causal test
 recent analyses of graph-token systems call for \cite{gteval}. And it is general: the same
 recipe trains on two model families without retuning, and an encoder trained on Wikidata answers
 questions over graphs it was never trained on.
@@ -116,9 +120,9 @@ This project builds \textbf{ConceptFormer v3} on the Apertus mini models (v1.1 I
 already have.
 
 \textbf{WP1 (scale to one million entities).} We extend the training corpus from today's 100k to
-1M Wikidata entities and complete the data-scaling curve. Because accuracy has not saturated, this
-shows how much a larger knowledge base is worth, and how close concept tokens come to full-text
-retrieval.
+1M Wikidata entities and complete the data-scaling curve, a step toward covering the full graph.
+Because accuracy has not saturated, this shows how much more of Wikidata's knowledge the encoder
+can absorb, and how close concept tokens come to full-text retrieval.
 
 \textbf{WP2 (multilingual).} We train the encoder on target-language graph labels so it works in
 the languages Apertus was built to serve, and measure whether it answers correctly and in the
