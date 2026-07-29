@@ -71,31 +71,33 @@
 \subsection*{a. Purpose of the Swiss AI Initiative Small Project}
 Open language models such as Apertus store what they know inside their weights. That knowledge is
 hard to update, and the models answer unreliably about the many entities that appear only rarely
-in their training data \cite{emptyshelves}. The common remedy, retrieval, pastes source text into
-the prompt on every query: accurate, but it spends hundreds of context tokens each time.
+in their training data \cite{emptyshelves}. The common remedy, retrieval-augmented generation,
+keeps the knowledge outside the model and places it in the prompt as text; a single entity's
+facts occupy on the order of a hundred context tokens, paid again on every query.
 
-We develop a third option. For an entity in a public knowledge graph such as Wikidata, we train a
-small encoder to compress that entity's facts into a handful of continuous \emph{concept tokens}
-that a frozen model reads in place of retrieved text. The tokens are computed once per entity and
-reused, cost roughly ten times fewer tokens than the equivalent text, and stay attributable: each
-one traces back to specific, citable graph edges.
+We develop a more compact carrier for the same knowledge. For an entity in a public knowledge
+graph such as Wikidata, a small trainable encoder compresses the entity's immediate graph
+neighborhood, its relations and neighboring entities, into a few continuous \emph{concept
+tokens} that the frozen model reads in place of the facts written out as text. The tokens are
+computed once per entity and reused across prompts, and the knowledge they carry is
+attributable: they are built from nothing but the entity's citable Wikidata edges.
 
 Our published work established that the idea works: ConceptFormer won the \textbf{best paper
-award} of its workshop at The Web Conference 2026 \cite{cfv1}, and a rigorous follow-up study, now
-in submission, confirms it on modern instruction-tuned models. \textbf{This proposal funds the
-next step.} It takes a method proven on one graph, in one language, for single facts, and builds
+award} of its workshop at The Web Conference 2026 \cite{cfv1}, and a follow-up study, prepared
+for submission, confirms it on modern instruction-tuned models. \textbf{This proposal funds the
+next step.} It takes a method validated on one graph, in one language, at one hop, and builds
 it into a knowledge layer for the Apertus mini models \cite{apertus} that scales to a million
 entities, works across languages, and answers multi-hop questions.
 
 \subsection*{b. Current Situation of the Thematic Area}
 \emph{What we have already shown.} In two rounds of work we have taken the idea from proposal to a
-validated method. It is efficient and it works: eight concept tokens reach the accuracy of
-retrieval that needs five to six times more text, and answer questions about entities the encoder
-never saw in training. The model reads the injected graph rather than a surface cue: when we swap
-a fact in the graph, the model's answer follows the swap, a causal test that current
-graph-to-token systems fail \cite{gteval}. And the recipe is general: it transfers between model
-families without retuning, and an encoder trained on one graph transfers to unrelated graphs it
-never saw.
+validated method. It is efficient: on questions about entities the encoder never saw in
+training, eight concept tokens match the accuracy of text baselines that spend five to six times
+more tokens. It is faithful: when we rewire an edge in the graph and re-encode, the model's
+answer follows the change at a rate that grows with the token budget, the causal test that
+recent analyses of graph-token systems call for \cite{gteval}. And it is general: the same
+recipe trains on two model families without retuning, and an encoder trained on Wikidata answers
+questions over graphs it was never trained on.
 
 We also mapped where the method stops today, and each limit becomes a work package below: it has
 been trained on at most 100{,}000 entities, with accuracy still rising when we stopped; it works
@@ -163,12 +165,13 @@ The project fits the Initiative's own model of openness. ConceptFormer's only kn
 Wikidata (CC0, public domain), its training uses no proprietary or labelled data, and all code,
 weights, and corpora are released: the same open-data, open-weights, open-recipe stance on which
 Apertus was built, and WP2 extends its multilingual reach. The result is a knowledge channel that
-grounds open models in curated, auditable sources. It is attributable (every concept token traces
-to citable graph edges, and our tests show the model uses them), editable (change an edge, the
-answer changes), and cheap (about ten times fewer context tokens than retrieval). For Switzerland
-and Europe, that supports digital sovereignty: an organization can maintain its own knowledge
-graph and update what an open model knows, without retraining it or running retrieval
-infrastructure.
+grounds open models in curated, auditable sources. It is attributable (an entity's tokens are
+built from nothing but its citable Wikidata edges, and our counterfactual tests show the model
+uses them), editable (updating the graph and re-encoding the entity takes one encoder pass, no
+retraining), and compact (at matched accuracy, text costs five to six times more context
+tokens). For Switzerland and Europe, that supports digital sovereignty: an organization can
+maintain its own knowledge graph and update what an open model knows, without retraining it or
+running retrieval infrastructure.
 
 \subsection*{g. Ethics and Regulatory Compliance}
 Data: Wikidata (CC0) and public benchmarks; no personal data beyond encyclopedic facts about
