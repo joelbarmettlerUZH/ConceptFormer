@@ -32,7 +32,7 @@
 \vspace{50pt}
 
 \section*{Project Name}
-\textbf{Scaling Laws of Knowledge Injection into Frozen Language Models}
+\textbf{An Open, Multilingual, Multi-hop Knowledge Layer for Apertus}
 
 \section*{Applicants}
 (names, institutions, and institutional email addresses; \underline{underline} scientific lead):
@@ -52,11 +52,11 @@
         \hline
         \textbf{Cost Dimension} & \textbf{Amount} \\
         \hline
-        Alps Compute Hours (GPU-h) & 30,000 GPU-h \\
+        Alps Compute Hours (GPU-h) & 6,000 GPU-h \\
         \hline
-        Alps Storage Space (TB) & 10 TB\\
+        Alps Storage Space (TB) & 5 TB\\
         \hline
-        Number of files to store simultaneously & $\sim$500,000 \\
+        Number of files to store simultaneously & $\sim$300,000 \\
         \hline
     \end{tabular}
 \end{table}
@@ -74,112 +74,114 @@ unreliably recalled for long-tail entities \cite{emptyshelves}) or \emph{as retr
 compressing a knowledge-graph entity's neighborhood into $k\!\approx\!8$ continuous
 \emph{concept tokens} consumed natively by a \emph{frozen} LLM --- attributable (each token
 traces to citable Wikidata edges), editable, and $\sim$10$\times$ cheaper than text at equal
-knowledge. Our published predecessor system (WWW Companion '26, \textbf{best paper award} of
-its hosting workshop \cite{cfv1}) and extensive pilots establish that the approach works; the
-project's purpose is to measure the \textbf{first scaling laws of knowledge injection}: how
-injected-knowledge quality scales with (i) the amount of knowledge the encoder is trained on
-and (ii) the size of the frozen model --- two axes our pilots show pull in \emph{opposite}
-directions, whose unmeasured interaction decides whether this channel matters at frontier scale.
+knowledge. Our published predecessor (WWW Companion '26, \textbf{best paper award} of its
+hosting workshop \cite{cfv1}), and the modern rebuild we describe below, establish that the
+approach works. The purpose of this Small Project is to turn a validated single-graph,
+single-language, single-hop method into an \textbf{open, multilingual, multi-hop knowledge layer
+for the Apertus mini models} \cite{apertus} --- four scale-ups we have each de-risked with a
+first result but cannot complete on consumer hardware.
 
 \subsection*{b. Current Situation of the Thematic Area}
 Two literatures approach the problem. \emph{Soft-token compression} (gist tokens, ICAE, PISCO,
-xRAG \cite{gist,icae,pisco,xrag}) compresses \emph{text} into continuous tokens; xRAG is
-closest to us (frozen decoder, same-model distillation) but translates a single retriever
-vector rather than learning compression, and evaluates neither unseen-entity generalization
-nor faithfulness. \emph{Knowledge-graph injection} (GNP, GraphToken, KBLaM, Knowledge Prompts
-\cite{gnp,graphtoken,kblam,knowledgeprompts}) encodes graphs per-question with labeled QA data,
-or precomputes per-entity vectors as lookup tables that cannot handle unseen entities. 2026
-meta-analyses find current graph-token systems are not faithful carriers of structure
-\cite{gteval}. No existing work combines an \emph{amortized, inductive} per-entity encoder,
-\emph{label-free} same-model distillation, and \emph{causal} faithfulness evaluation --- and,
-decisively for this call: scaling laws exist for \emph{parametric} knowledge storage
-\cite{physics33}, but \textbf{no study measures injection quality against frozen-model scale
-within one model family, and no data-scaling law for a knowledge encoder exists.}
+xRAG \cite{gist,icae,pisco,xrag}) compresses \emph{text} into continuous tokens; xRAG is closest
+to us (frozen decoder, same-model distillation) but translates a single retriever vector rather
+than learning compression, and evaluates neither unseen-entity generalization nor faithfulness.
+\emph{Knowledge-graph injection} (GNP, GraphToken, KBLaM, Knowledge Prompts
+\cite{gnp,graphtoken,kblam,knowledgeprompts}) encodes graphs per question with labeled QA, or
+precomputes per-entity vectors as lookup tables that cannot handle unseen entities; 2026
+meta-analyses find these graph-token systems are not faithful carriers of structure
+\cite{gteval}. No prior work combines an \emph{amortized, inductive} per-entity encoder,
+\emph{label-free} same-model distillation, and \emph{causal} faithfulness evaluation.
 
-Our pilots (two consumer 24\,GB GPUs, $\sim$60 runs, all public) de-risk the measurement: at an
-8-token budget, concept tokens beat question-aware retrieval and LLM-written summaries
-2.6--3.2$\times$ on the full 14{,}266-question PopQA benchmark, an untrained-injection control
-is near floor, counterfactual edge-swap probes show genuine graph reading, and injection
-preserves off-topic behavior. Crucially, unseen-entity accuracy scales $2.05\times$ from 10k to
-100k training entities \emph{without saturating}, while at fixed data the injection margin
-\emph{halves} from 0.8B to 2B frozen parameters: the proposal funds completing a de-risked
-measurement, not testing a new idea.
+We rebuilt the method on modern instruction-tuned backbones and hardened the evaluation (full
+14{,}266-question PopQA on \emph{unseen} entities, leakage-free held-out, Wilson CIs, paired
+McNemar, 3 seeds). Established, fully reproducible from the public repo and W\&B: (i) eight
+concept tokens lift a frozen Qwen3-0.6B from 0.10 to 0.48 exact-match on unseen entities, where
+text baselines need $\sim$5--6$\times$ more tokens for parity, and an untrained-injection
+control (0.13) confirms the trained encoder is the effect; (ii) unseen-entity accuracy scales
+$2.05\times$ from 10k to 100k training entities \emph{without saturating}; (iii) counterfactual
+edge-swap probes show the model genuinely \emph{reads} the injected graph; (iv) the recipe
+transfers from Qwen3 to Gemma-3 \emph{without retuning}, and a Wikidata-trained encoder transfers
+zero-shot to two unseen graphs (movies, football). Three limits, hit on 24\,GB consumer GPUs,
+define this project: corpora beyond 100k entities exceed our throughput while the data axis is
+still rising; an English-trained encoder does not carry across the concept \emph{label language}
+(German-labeled concepts sit near the no-injection floor, $\sim$9\% vs 42--50\% for English), a
+boundary we located precisely; and our concept tokens compress only a 1-hop neighborhood, with
+multi-hop composition validated so far only as a proof of concept.
 
 \subsection*{c. Activities}
-All work runs on the \textbf{Qwen3.5 family} (dense 0.8B--27B; MoE 35B-A3B/122B-A10B; every
-size natively multimodal), open Wikidata-derived corpora, and our public, CI-gated pipeline.
-Compute is justified from a \emph{measured} anchor: one converged training run (0.6B backbone,
-100k entities) takes 6.0 wall-hours on an RTX 4090 (public W\&B logs); assuming a conservative
-2$\times$ realized GH200 speedup and a 1.4$\times$ convergence margin, a run costs
-$4.2 \cdot P \cdot D$ GPU-h ($P$ = active-parameter ratio vs.\ 0.8B, $D$ = entity ratio vs.\
-100k). Work packages (GPU-h): \textbf{WP0} corpus scale-up to 1M entities (240);
-\textbf{WP1} data-scaling transect at 0.8B, $k$-family $\times$ 3 seeds $\times$ \{300k, 1M\}
-entities (670); \textbf{WP2} dense model transect at 100k entities, 5 sizes $\times$ $k$-family
-$\times$ 3 seeds + per-size teacher extraction, hyperparameter screens, and encoder-capacity
-re-sweeps (4,870); \textbf{WP3} MoE: does injection track total or active parameters? (1,730,
-incl.\ a 397B-A17B single-node-sharded stretch run); \textbf{WP4} the decisive
-data$\times$model interaction corners, \{300k, 1M\} $\times$ \{9B, 27B\} (6,920); \textbf{WP5}
-injection-port factor --- text-embedding vs.\ vision-token interface at 3 sizes (piloted:
-parity at $k{=}8$; 1,300); \textbf{WP6} community baselines: xRAG-style bridge, per-entity
-prefix-tuning, on-policy distillation, 2-hop rate--distortion (520); \textbf{WP7}
-cross-cutting evaluation: full-benchmark PopQA + EntityQuestions + counterfactual faithfulness
-and capability-preservation sweeps over $\sim$170 checkpoints (900). Subtotal 17,150; +25\%
-contingency (restarts, cluster onboarding) $=$ 21,440; a named stretch tier (full $k$-family at
-MoE/corners, a 3M-entity point, extra ports, convergence-verification) adds 5,570 $\Rightarrow$
-\textbf{request 30,000 GPU-h}; a 20k fallback preserves both core laws. The workload is $\sim$200 independent single-node jobs; only
-the two largest MoE models need intra-node sharding --- and every backbone above $\sim$4B is memory-infeasible on our own hardware, which
-is the literal reason for this application. Storage: model weights, corpora, teacher caches,
-$\sim$200 checkpoints, and per-item evaluation dumps total $\sim$4.5 TB; with cache headroom we
-request 10 TB ($\sim$500k files).
+All work runs on the \textbf{Apertus mini family} \cite{apertus} (Apertus-v1.1 Instruct at 0.5B,
+1.5B, 4B; primary backbone 0.5B, with Qwen3 and Gemma-3 as validated controls), open
+Wikidata-derived corpora, and our public, CI-gated pipeline. Four work packages, each extending
+a first result from \S b:
+\textbf{WP1 --- 1M entities:} complete the data-scaling law from 100k to 300k (partly built) and
+1M, to locate where returns level off and whether 1M closes the gap to text-RAG.
+\textbf{WP2 --- Multilingual:} train the encoder on target-language Wikidata labels across a
+representative set of Apertus's languages, measuring per-language unseen-entity accuracy and
+answer-language fidelity.
+\textbf{WP3 --- Multi-hop:} represent each neighbor by its \emph{own} concept vector so a
+shared-weight encoder composes across hops; build the Wikidata multi-hop corpus and train the
+recursion label-free, turning the neighborhood compressor into a learned graph embedder.
+\textbf{WP4 --- Apertus mini backbones:} apply the full pipeline across 0.5B/1.5B/4B for the
+first knowledge-injection results on the Swiss open model, and the marquee combination --- a
+multilingual, multi-hop concept layer on Apertus.
+
+Compute is justified from a \emph{measured} anchor: one converged run (0.6B backbone, 100k
+entities) takes 6.0 wall-hours on an RTX 4090 (public W\&B logs); at a conservative 2$\times$
+GH200 speedup and 1.4$\times$ convergence margin, a run costs $4.2\cdot P\cdot D$ GPU-h ($P$ =
+active-parameter ratio vs.\ 0.8B, $D$ = entity ratio vs.\ 100k). Budget (GPU-h): \textbf{WP1}
+1M-corpus generation and prep + $k$-family $\times$ 3 seeds $\times$ \{300k, 1M\} (880);
+\textbf{WP2} per-language QA generation, teacher extraction, and multilingual + monolingual
+training (344); \textbf{WP3} 2-hop corpus + recursive hop-2/hop-3 training (516); \textbf{WP4}
+the Apertus 0.5B/1.5B/4B sweep ($\sum P = 7.5$) plus multilingual and 1M corners (742);
+cross-cutting evaluation over $\sim$120 checkpoints (150). Subtotal 2{,}632; +25\% contingency
+(restarts, cluster onboarding) $=$ 3{,}290; a named stretch tier (a 3M-entity point, the full
+multilingual $\times$ multi-hop $\times$ Apertus corner, additional languages, convergence
+verification) adds $\sim$1{,}840 $\Rightarrow$ \textbf{request 6{,}000 GPU-h}; a $\sim$2{,}600
+fallback preserves all four WPs' core results. The workload is $\sim$120 independent single-node
+jobs; what our own hardware cannot sustain is corpus generation at 1M entities and per-language
+teacher extraction, not model size. Storage (corpora, teacher caches, $\sim$120 checkpoints,
+per-item dumps) totals $\sim$3.5 TB; with headroom we request 5 TB ($\sim$300k files).
 
 \subsection*{d. Team}
 The team carried this line of work through peer review once already: v1 \cite{cfv1} (Barmettler,
 Bernstein, Rossetto) won its hosting workshop's best paper award at The Web Conference 2026.
 J.~Barmettler (scientific lead, PhD candidate UZH) built the v2 system end-to-end: data
-pipeline, training, the hardened evaluation protocol, and the pilot scaling surface.
-Prof.~A.~Bernstein (UZH) contributes long-standing expertise in knowledge graphs, the Semantic
-Web, and human-AI collaboration; Dr.~L.~Rossetto contributes expertise in multimodal retrieval
-and evaluation [roles to confirm]. Collaboration during the funding period: weekly experiment
-reviews against the pre-registered plan, shared W\&B dashboards with per-item dumps for
-independent verification of every claim, and rotating adversarial review --- the working mode
-that already caught and corrected four evaluation defects in the pilots. [Multi-node/Alps
-experience of team members to be added.]
+pipeline, training, the hardened evaluation protocol, and the cross-family and cross-lingual
+studies. Prof.~A.~Bernstein (UZH) contributes expertise in knowledge graphs and the Semantic
+Web; Dr.~L.~Rossetto contributes expertise in multimodal retrieval and evaluation [roles to
+confirm]. During the funding period we run weekly reviews against the pre-registered plan and
+share W\&B dashboards with per-item dumps for independent verification of every claim.
+[Multi-node/Alps experience to be added.]
 
 \subsection*{e. Expected Outputs and Outcomes}
-Within six months: (1) the \textbf{scaling-law paper} --- the first empirical laws for
-knowledge injection into frozen LLMs, with the causal-faithfulness methodology; (2)
-\textbf{open data}: Wikidata QA-distillation corpora at 100k/300k/1M entities with sha-manifested
-snapshots (CC0 sources); (3) \textbf{open weights}: all $\sim$200 trained encoders on
-HuggingFace; (4) \textbf{open source}: the full pipeline and evaluation harness (already
-public, 244-test CI); (5) the \textbf{open results dataset}: every run's per-item outputs,
-enabling third-party re-analysis without any GPU. Outcome-wise, the laws answer a
-go/no-go question for the field --- \emph{is} injected knowledge a channel worth scaling? ---
-and, if the answer is yes, directly seed a \textbf{Large Project proposal}: a
-Swiss-made, provenance-carrying knowledge layer for open foundation models (e.g.\ Apertus-class
-models), where the Small Project's recipe, corpora, and laws determine the design points worth
-training at scale.
+Within six months: (1) a \textbf{paper} with the first data-scaling law for an inductive
+knowledge encoder, the multilingual and multi-hop results, and the causal-faithfulness
+methodology; (2) \textbf{open data} --- 300k/1M, multilingual, and multi-hop Wikidata corpora
+(CC0, sha-manifested); (3) \textbf{open weights} --- all encoders, including Apertus-mini concept
+layers, on HuggingFace; (4) \textbf{open source} --- the full CI-gated pipeline and eval harness
+(already public); (5) the \textbf{open results dataset} for GPU-free re-analysis. The project
+delivers a provenance-carrying knowledge layer purpose-built for Apertus and seeds a
+\textbf{Large Project} that trains it at the design points these results identify.
 
 \subsection*{f. Importance for Switzerland, Europe, and beyond}
-The project advances the Initiative's trustworthy-AI mission concretely: concept tokens make
-model knowledge \emph{attributable} (every token traces to citable knowledge-graph edges, and
-our counterfactual protocol \emph{proves} the model uses them), \emph{editable} (swap an edge,
-the answer follows), and \emph{efficient} ($\sim$10$\times$ fewer context tokens than
-retrieval at equal knowledge --- a direct inference-cost and energy lever).
-For Switzerland and Europe, a knowledge channel that grounds
-open models in curated, auditable sources rather than opaque weights is a building block for
-digital sovereignty: public-sector and industry deployments can maintain their own knowledge
-graphs and update model knowledge without retraining or per-query retrieval infrastructure ---
-with every artifact open, the value chain stays reproducible and European.
+The project is a direct fit for the Initiative's own model. ConceptFormer's only knowledge source
+is \textbf{Wikidata (CC0)}, training is \textbf{label-free} (no proprietary QA), and all code,
+weights, corpora, and per-item outputs are released --- the same open-data, open-weights,
+open-recipe stance on which Apertus \cite{apertus} was built, and WP2 amplifies its flagship
+multilingual capability. A knowledge channel that grounds open models in curated, auditable
+sources (every concept token traces to citable KG edges, and our counterfactual protocol proves
+the model uses them), rather than opaque weights, is a building block for European digital
+sovereignty: deployments can maintain their own knowledge graphs and update model knowledge
+without retraining or per-query retrieval, with the whole value chain reproducible.
 
 \subsection*{g. Ethics and Regulatory Compliance}
 Data: Wikidata (CC0) and public benchmarks; no personal data beyond encyclopedic facts about
-public entities, no human subjects, no scraping. Generated training questions come from an
-open-weights model and are released with their prompts; model weights used (Apache-2.0-family
-licenses) permit research use and redistribution of derivatives, and all
-released artifacts carry explicit licenses. The approach is transparency-\emph{enhancing}
-(provenance-carrying knowledge aligns with EU AI Act expectations); we comply with UZH
-research-integrity and data-management regulations and CSCS usage policies, and publish all
-results, including negative ones.
+public entities, no human subjects, no scraping. Generated training questions come from
+open-weight models and are released with their prompts; all artifacts carry explicit licenses.
+The approach is transparency-\emph{enhancing}, aligned with EU AI Act expectations; we comply
+with UZH research-integrity and CSCS usage policies and publish all results, including negative
+ones.
 
 \newpage
 \section*{Signature}
@@ -204,6 +206,10 @@ requirements for participation according to the call document.
 ConceptFormer: Towards graph-native grounding of large language models via latent concept
 injection. \emph{WWW Companion '26}, pp.~587--596. Best paper award, hosting workshop.
 DOI 10.1145/3774905.3794653.
+
+\bibitem{apertus} Swiss AI Initiative. Apertus: An open, multilingual language model (mini
+family: Apertus-v1.1 0.5B/1.5B/4B). \texttt{huggingface.co/collections/swiss-ai/apertus-mini}.
+[Fill technical-report citation / arXiv id.]
 
 \bibitem{emptyshelves} Empty shelves or lost keys? Disentangling encoding from recall of
 long-tail facts in language models. arXiv:2602.14080, 2026.
@@ -234,9 +240,6 @@ into language models through soft prompts. arXiv:2210.04726, 2022.
 
 \bibitem{gteval} Revisiting graph-tokenizing LLMs: A systematic evaluation. arXiv:2605.03514,
 2026.
-
-\bibitem{physics33} Z.~Allen-Zhu, Y.~Li. Physics of language models: Part 3.3, knowledge
-capacity scaling laws. arXiv:2404.05405, 2024.
 
 \end{thebibliography}
 
