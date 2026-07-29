@@ -11,7 +11,7 @@
 ## COVER PAGE (placeholders)
 
 - **Title:** An Open, Multilingual, Multi-hop Knowledge Layer for Apertus
-- **Scientific lead:** Joel Barmettler (PhD candidate, University of Zurich)
+- **Scientific lead:** Joel Barmettler (researcher, University of Zurich)
 - **Swiss PI (signs):** [PROF NAME, UZH]
 - **Requested allocation:** ~6,000 GH200 GPU-hours over 6 months (bottom-up, Appendix A)
 - **Backbones:** Apertus mini family v1.1 -- 0.5B/1.5B/4B-Instruct (primary) + Qwen3 / Gemma-3 (validated controls)
