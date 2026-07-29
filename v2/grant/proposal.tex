@@ -68,120 +68,112 @@
 \section*{Proposal Description (max. 2 A4 pages)}
 
 \subsection*{a. Purpose of the Swiss AI Initiative Small Project}
-Large language models (LLMs) hold knowledge either \emph{in their weights} (uneditable, and
-unreliably recalled for long-tail entities \cite{emptyshelves}) or \emph{as retrieved text}
-(faithful but costing hundreds of context tokens per query). We develop a third channel:
-compressing a knowledge-graph entity's neighborhood into $k\!\approx\!8$ continuous
-\emph{concept tokens} consumed natively by a \emph{frozen} LLM: attributable (each token
-traces to citable Wikidata edges), editable, and $\sim$10$\times$ cheaper than text at equal
-knowledge. Our published predecessor (WWW Companion '26, \textbf{best paper award} of its
-hosting workshop \cite{cfv1}), and the modern rebuild we describe below, establish that the
-approach works. The purpose of this Small Project is to turn a validated single-graph,
-single-language, single-hop method into an \textbf{open, multilingual, multi-hop knowledge layer
-for the Apertus mini models} \cite{apertus}. We have a first result for each of these four
-scale-ups but cannot complete them on consumer hardware.
+Open language models such as Apertus store what they know inside their weights. That knowledge is
+hard to update, and the models answer unreliably about the many entities that appear only rarely
+in their training data \cite{emptyshelves}. The common remedy, retrieval, pastes source text into
+the prompt on every query: accurate, but it spends hundreds of context tokens each time.
+
+We develop a third option. For an entity in a public knowledge graph such as Wikidata, we train a
+small encoder to compress that entity's facts into a handful of continuous \emph{concept tokens}
+that a frozen model reads in place of retrieved text. The tokens are computed once per entity and
+reused, cost roughly ten times fewer tokens than the equivalent text, and stay attributable: each
+one traces back to specific, citable graph edges.
+
+Our published work established that the idea works: ConceptFormer won the \textbf{best paper
+award} of its workshop at The Web Conference 2026 \cite{cfv1}, and a rigorous follow-up study, now
+in submission, confirms it on modern instruction-tuned models. \textbf{This proposal funds the
+next step.} It takes a method proven on one graph, in one language, for single facts, and builds
+it into a knowledge layer for the Apertus mini models \cite{apertus} that scales to a million
+entities, works across languages, and answers multi-hop questions.
 
 \subsection*{b. Current Situation of the Thematic Area}
-Two literatures approach the problem. \emph{Soft-token compression} (gist tokens, ICAE, PISCO,
-xRAG \cite{gist,icae,pisco,xrag}) compresses \emph{text} into continuous tokens; xRAG is closest
-to us (frozen decoder, same-model distillation) but translates a single retriever vector instead
-of learning compression, and evaluates neither unseen-entity generalization nor faithfulness.
-\emph{Knowledge-graph injection} (GNP, GraphToken, KBLaM, Knowledge Prompts
-\cite{gnp,graphtoken,kblam,knowledgeprompts}) encodes graphs per question with labeled QA, or
-precomputes per-entity vectors as lookup tables that cannot handle unseen entities; 2026
-meta-analyses find these graph-token systems are not faithful carriers of structure
-\cite{gteval}. No prior work combines an \emph{amortized, inductive} per-entity encoder,
-\emph{label-free} same-model distillation, and \emph{causal} faithfulness evaluation.
+\emph{What we have already shown.} In two rounds of work we have taken the idea from proposal to a
+validated method. It is efficient and it works: eight concept tokens reach the accuracy of
+retrieval that needs five to six times more text, and answer questions about entities the encoder
+never saw in training. The model reads the injected graph rather than a surface cue: when we swap
+a fact in the graph, the model's answer follows the swap, a causal test that current
+graph-to-token systems fail \cite{gteval}. And the recipe is general: it transfers between model
+families without retuning, and an encoder trained on one graph transfers to unrelated graphs it
+never saw.
 
-We rebuilt the method on modern instruction-tuned backbones and hardened the evaluation (full
-14{,}266-question PopQA on \emph{unseen} entities, leakage-free held-out, Wilson CIs, paired
-McNemar, 3 seeds). Established, fully reproducible from the public repo and W\&B: (i) eight
-concept tokens lift a frozen Qwen3-0.6B from 0.10 to 0.48 exact-match on unseen entities, where
-text baselines need $\sim$5--6$\times$ more tokens for parity, and an untrained-injection
-control (0.13) confirms the trained encoder is the effect; (ii) unseen-entity accuracy scales
-$2.05\times$ from 10k to 100k training entities \emph{without saturating}; (iii) counterfactual
-edge-swap probes show the model \emph{reads} the injected graph; (iv) the recipe
-transfers from Qwen3 to Gemma-3 \emph{without retuning}, and a Wikidata-trained encoder transfers
-zero-shot to two unseen graphs (movies, football). Three limits, hit on 24\,GB consumer GPUs,
-define this project: corpora beyond 100k entities exceed our throughput while the data axis is
-still rising; an English-trained encoder does not carry across the concept \emph{label language}
-(German-labeled concepts sit near the no-injection floor, $\sim$9\% vs 42--50\% for English), a
-boundary we located precisely; and our concept tokens compress only a 1-hop neighborhood, with
-multi-hop composition validated so far only as a proof of concept.
+We also mapped where the method stops today, and each limit becomes a work package below: it has
+been trained on at most 100{,}000 entities, with accuracy still rising when we stopped; it works
+only in the language of the labels it was trained on; and it compresses an entity's immediate
+neighborhood, not multi-step chains.
+
+\emph{How this sits in the field.} Two lines of research come close. Text-compression methods
+(e.g.\ xRAG \cite{xrag}) squeeze retrieved passages into few tokens, but do not learn from a graph
+or test unseen entities and faithfulness. Graph-injection methods (e.g.\ GraphToken, KBLaM
+\cite{graphtoken,kblam}) encode graphs, but re-run per question and need labelled training data.
+None combines a reusable per-entity encoder, label-free training, and a causal faithfulness test.
 
 \subsection*{c. Activities}
-All work runs on the \textbf{Apertus mini family} \cite{apertus} (Apertus-v1.1 Instruct at 0.5B,
-1.5B, 4B; primary backbone 0.5B, with Qwen3 and Gemma-3 as validated controls), open
-Wikidata-derived corpora, and our public, CI-gated pipeline. Four work packages, each extending
-a first result from \S b:
-\textbf{WP1 (1M entities):} complete the data-scaling law from 100k to 300k (partly built) and
-1M, to locate where returns level off and whether 1M closes the gap to text-RAG.
-\textbf{WP2 (Multilingual):} train the encoder on target-language Wikidata labels across a
-representative set of Apertus's languages, measuring per-language unseen-entity accuracy and
-answer-language fidelity.
-\textbf{WP3 (Multi-hop):} represent each neighbor by its \emph{own} concept vector so a
-shared-weight encoder composes across hops; build the Wikidata multi-hop corpus and train the
-recursion label-free, turning the neighborhood compressor into a learned graph embedder.
-\textbf{WP4 (Apertus mini backbones):} apply the full pipeline across 0.5B/1.5B/4B for the
-first knowledge-injection results on the Swiss open model, and the combined result: a
-multilingual, multi-hop concept layer on Apertus.
+This project builds \textbf{ConceptFormer v3} on the Apertus mini models (v1.1 Instruct, 0.5B /
+1.5B / 4B), with Qwen3 and Gemma-3 as controls. Four work packages, each starting from a result we
+already have.
 
-Compute is justified from a \emph{measured} anchor: one converged run (0.6B backbone, 100k
-entities) takes 6.0 wall-hours on an RTX 4090 (public W\&B logs); at a conservative 2$\times$
-GH200 speedup and 1.4$\times$ convergence margin, a run costs $4.2\cdot P\cdot D$ GPU-h ($P$ =
-active-parameter ratio vs.\ 0.8B, $D$ = entity ratio vs.\ 100k). Budget (GPU-h): \textbf{WP1}
-1M-corpus generation and prep + $k$-family $\times$ 3 seeds $\times$ \{300k, 1M\} (880);
-\textbf{WP2} per-language QA generation, teacher extraction, and multilingual + monolingual
-training (344); \textbf{WP3} 2-hop corpus + recursive hop-2/hop-3 training (516); \textbf{WP4}
-the Apertus 0.5B/1.5B/4B sweep ($\sum P = 7.5$) plus multilingual and 1M corners (742);
-cross-cutting evaluation over $\sim$120 checkpoints (150). Subtotal 2{,}632; +25\% contingency
-(restarts, cluster onboarding) brings this to 3{,}290. A named stretch tier (a 3M-entity point,
-the full multilingual $\times$ multi-hop $\times$ Apertus corner, additional languages,
-convergence verification) adds $\sim$1{,}840, for a total \textbf{request of 6{,}000 GPU-h}; a
-$\sim$2{,}600 fallback preserves all four WPs' core results. The workload is $\sim$120 independent single-node
-jobs; what our own hardware cannot sustain is corpus generation at 1M entities and per-language
-teacher extraction, not model size. Storage (corpora, teacher caches, $\sim$120 checkpoints,
-per-item dumps) totals $\sim$3.5 TB; with headroom we request 5 TB ($\sim$300k files).
+\textbf{WP1 (scale to one million entities).} We extend the training corpus from today's 100k to
+1M Wikidata entities and complete the data-scaling curve. Because accuracy has not saturated, this
+shows how much a larger knowledge base is worth, and how close concept tokens come to full-text
+retrieval.
+
+\textbf{WP2 (multilingual).} We train the encoder on target-language graph labels so it works in
+the languages Apertus was built to serve, and measure whether it answers correctly and in the
+user's language. This package most directly extends Apertus's multilingual strength.
+
+\textbf{WP3 (multi-hop).} We let the encoder represent a neighbor by its own concept vector, so
+one shared encoder composes facts across several hops. Early experiments already answer two- and
+three-hop questions that single-hop tokens cannot; here we build the training data and method to
+do it at scale.
+
+\textbf{WP4 (Apertus).} We run the full pipeline across the Apertus mini family, producing the
+first knowledge-injection results on the Swiss open model and the combined system: a multilingual,
+multi-hop concept layer for Apertus.
+
+\emph{Why the cluster.} Every model here is small (Apertus-mini scale); what our two consumer GPUs
+cannot do is generate and process the million-entity and per-language training corpora, and run
+the resulting sweep. We size the request from a measured baseline: one training run takes six
+hours on our hardware. The total is about \textbf{6{,}000 GPU-hours over six months}, including a
+25\% contingency and a named stretch tier; a 2{,}600-hour fallback still delivers the four core
+results. We also request 5 TB of storage for corpora, checkpoints, and per-item evaluation outputs.
 
 \subsection*{d. Team}
-The team carried this line of work through peer review once already: v1 \cite{cfv1} (Barmettler,
-Bernstein, Rossetto) won its hosting workshop's best paper award at The Web Conference 2026.
-J.~Barmettler (scientific lead, PhD candidate UZH) built the v2 system end-to-end: data
-pipeline, training, the hardened evaluation protocol, and the cross-family and cross-lingual
-studies. Prof.~A.~Bernstein (UZH) contributes expertise in knowledge graphs and the Semantic
-Web; Dr.~L.~Rossetto contributes expertise in multimodal retrieval and evaluation [roles to
-confirm]. During the funding period we run weekly reviews against the pre-registered plan and
-share W\&B dashboards with per-item dumps for independent verification of every claim.
+The team has carried this line of work through peer review once already: v1 \cite{cfv1}
+(Barmettler, Bernstein, Rossetto) won its workshop's best paper award at The Web Conference 2026.
+J.~Barmettler (scientific lead, PhD candidate, UZH) built the current system end to end: data
+pipeline, training, evaluation, and the multilingual and multi-hop pilots. Prof.~A.~Bernstein
+(UZH) brings expertise in knowledge graphs and the Semantic Web; Dr.~L.~Rossetto brings expertise
+in multimodal retrieval and evaluation [roles to confirm]. We work against a pre-registered plan
+with shared dashboards and per-item result dumps, so every claim can be checked independently.
 [Multi-node/Alps experience to be added.]
 
 \subsection*{e. Expected Outputs and Outcomes}
-Within six months: (1) a \textbf{paper} with the first data-scaling law for an inductive
-knowledge encoder, the multilingual and multi-hop results, and the causal-faithfulness
-methodology; (2) \textbf{open data}: 300k/1M, multilingual, and multi-hop Wikidata corpora
-(CC0, sha-manifested); (3) \textbf{open weights}: all encoders, including Apertus-mini concept
-layers, on HuggingFace; (4) \textbf{open source}: the full CI-gated pipeline and eval harness
-(already public); (5) the \textbf{open results dataset} for GPU-free re-analysis. The project
-delivers a provenance-carrying knowledge layer purpose-built for Apertus and seeds a
-\textbf{Large Project} that trains it at the design points these results identify.
+Within six months: (1) a paper reporting the data-scaling law, the multilingual and multi-hop
+results, and the causal-faithfulness method; (2) open corpora at 300k and 1M entities, multilingual
+and multi-hop (Wikidata, CC0); (3) open weights for every trained encoder, including the
+Apertus-mini concept layers; (4) the open, tested pipeline and evaluation harness; (5) the
+per-item results dataset, so others can re-analyze our findings without a GPU. Together these turn
+ConceptFormer into a knowledge layer purpose-built for Apertus, and identify the design points
+worth training at full scale in a follow-on Large Project.
 
 \subsection*{f. Importance for Switzerland, Europe, and beyond}
-The project is a direct fit for the Initiative's own model. ConceptFormer's only knowledge source
-is \textbf{Wikidata (CC0)}, training is \textbf{label-free} (no proprietary QA), and all code,
-weights, corpora, and per-item outputs are released: the same open-data, open-weights,
-open-recipe stance on which Apertus \cite{apertus} was built, and WP2 extends its
-multilingual capability. A knowledge channel that grounds open models in curated, auditable
-sources (every concept token traces to citable KG edges, and our counterfactual protocol shows
-the model uses them) supports European digital sovereignty: deployments can maintain their own
-knowledge graphs and update model knowledge without retraining or per-query retrieval, with the
-whole value chain reproducible.
+The project fits the Initiative's own model of openness. ConceptFormer's only knowledge source is
+Wikidata (CC0, public domain), its training uses no proprietary or labelled data, and all code,
+weights, and corpora are released: the same open-data, open-weights, open-recipe stance on which
+Apertus was built, and WP2 extends its multilingual reach. The result is a knowledge channel that
+grounds open models in curated, auditable sources. It is attributable (every concept token traces
+to citable graph edges, and our tests show the model uses them), editable (change an edge, the
+answer changes), and cheap (about ten times fewer context tokens than retrieval). For Switzerland
+and Europe, that supports digital sovereignty: an organization can maintain its own knowledge
+graph and update what an open model knows, without retraining it or running retrieval
+infrastructure.
 
 \subsection*{g. Ethics and Regulatory Compliance}
 Data: Wikidata (CC0) and public benchmarks; no personal data beyond encyclopedic facts about
-public entities, no human subjects, no scraping. Generated training questions come from
-open-weight models and are released with their prompts; all artifacts carry explicit licenses.
-The approach is transparency-\emph{enhancing}, aligned with EU AI Act expectations; we comply
-with UZH research-integrity and CSCS usage policies and publish all results, including negative
-ones.
+public entities, no human subjects, and no scraping. Training questions are generated by
+open-weight models and released with their prompts; all artifacts carry explicit licenses. The
+approach is transparency-enhancing and aligns with EU AI Act expectations; we follow UZH
+research-integrity and CSCS usage policies and publish all results, including negative ones.
 
 \newpage
 \section*{Signature}
@@ -214,29 +206,14 @@ family: Apertus-v1.1 0.5B/1.5B/4B). \texttt{huggingface.co/collections/swiss-ai/
 \bibitem{emptyshelves} Empty shelves or lost keys? Disentangling encoding from recall of
 long-tail facts in language models. arXiv:2602.14080, 2026.
 
-\bibitem{gist} J.~Mu, X.~L.~Li, N.~Goodman. Learning to compress prompts with gist tokens.
-\emph{NeurIPS}, 2023.
-
-\bibitem{icae} T.~Ge et al. In-context autoencoder for context compression in a large language
-model. \emph{ICLR}, 2024.
-
-\bibitem{pisco} M.~Louis et al. PISCO: Pretty simple compression for retrieval-augmented
-generation. arXiv:2501.16075, 2025.
-
 \bibitem{xrag} X.~Cheng et al. xRAG: Extreme context compression for retrieval-augmented
 generation with one token. \emph{NeurIPS}, 2024.
-
-\bibitem{gnp} Y.~Tian et al. Graph neural prompting with large language models. \emph{AAAI},
-2024.
 
 \bibitem{graphtoken} B.~Perozzi et al. Let your graph do the talking: Encoding structured data
 for LLMs. arXiv:2402.05862, 2024.
 
 \bibitem{kblam} X.~Wang, T.~Isazawa, L.~Mikaelyan, J.~Hensman. KBLaM: Knowledge base augmented
 language model. \emph{ICLR}, 2025.
-
-\bibitem{knowledgeprompts} C.~N.~dos Santos et al. Knowledge prompts: Injecting world knowledge
-into language models through soft prompts. arXiv:2210.04726, 2022.
 
 \bibitem{gteval} Revisiting graph-tokenizing LLMs: A systematic evaluation. arXiv:2605.03514,
 2026.
