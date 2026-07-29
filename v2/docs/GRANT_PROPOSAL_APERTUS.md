@@ -3,8 +3,8 @@
 > Working draft. Re-spined around 4 work packages with Apertus as the anchor (supersedes the
 > scaling-law-framed GRANT_PROPOSAL_DRAFT.md). Format target: research plan <= 2 A4 pages
 > (11pt, 1.5 spacing), excluding cover, references, appendix. Compute ask sized bottom-up in
-> Appendix A. FLAGS FOR JOEL: [Apertus-1.5-mini sizes], [Swiss PI name], [page/format limit],
-> [exact grant program + deadline].
+> Appendix A. Authoritative version is grant/proposal.tex. Open: [page/format limit],
+> [exact grant program + deadline], [Apertus arXiv citation].
 
 ---
 
@@ -12,7 +12,7 @@
 
 - **Title:** An Open, Multilingual, Multi-hop Knowledge Layer for Apertus
 - **Scientific lead:** Joel Barmettler (researcher, University of Zurich)
-- **Swiss PI (signs):** [PROF NAME, UZH]
+- **Swiss PI (signs):** Prof. Dr. Abraham Bernstein (Department of Informatics, UZH)
 - **Requested allocation:** ~6,000 GH200 GPU-hours over 6 months (bottom-up, Appendix A)
 - **Backbones:** Apertus mini family v1.1 -- 0.5B/1.5B/4B-Instruct (primary) + Qwen3 / Gemma-3 (validated controls)
 - **Open artifacts:** corpora (10k-1M entities, multilingual, multi-hop; CC0 source), all
