@@ -161,7 +161,11 @@ reference at k=32" oversells 0.658 vs 0.921 (26pt gap). main.tex:601. (R5, R7.)
 - N10 ("identical item sets" ~7-item cross-run drift): left as-is by decision -- within a single
   eval-final run base/concept/RAG are on identical items, so McNemar pairing is valid; the drift
   is across seed runs, not within a comparison.
-- B1/B2/N6/T3 placement + ratio: before_entity 10k k-curve retrain in progress (bm0ja2zrw), ~2 days.
+- B1/B2/N6/T3 placement + ratio (2026-07-30): before_entity 10k k-curve retrained
+  (be10k_k{1,2,4,16,32} x 3 seeds + existing 6-seed k8 pool; W&B kcurve-before-entity-10k).
+  fig_kcurves is now single-placement (caption fixed), and the substitution ratios are
+  recomputed on it: 1.35 (k1) -> ~2.3 (k4-8) -> 1.58 (k32). "0.210 -> 0.477" and the ratio now
+  cohere (B1 resolved); high-k seed-spread caveat added to S5.2 (N6). All audit items closed.
 
 ## TRIVIA
 - T1 "14,230 questions" -> 14,229. main.tex:641,650. (R10.)

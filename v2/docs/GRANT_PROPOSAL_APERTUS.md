@@ -42,7 +42,7 @@ W&B:
   the same accuracy. An untrained-injection control (0.13) confirms the trained encoder is the
   effect.
 - **Data scaling, not yet saturated.** 10x more training entities (10k -> 100k) raises
-  unseen-entity accuracy 2.05x on identical eval sets, with the token-budget curve still
+  unseen-entity accuracy 2.3x on identical eval sets (single-placement re-anchor 2026-07-30), with the token-budget curve still
   climbing at k=32.
 - **The model reads the graph (causal).** Counterfactual edge-swap probes: the model follows a
   rewired edge to the false answer at a rate rising with the token budget, evidence current
@@ -63,7 +63,7 @@ small proof of concept. Each limit is a work package below, and each already has
 
 **WP1 -- Scale to one million entities.** Complete the data-scaling law from 100k to 300k
 (partially built) and 1M Wikidata entities, on the primary Apertus-1.5-mini backbone. This is
-the single best-evidenced extension: the 2.05x gain per decade has not saturated, so the open
+the single best-evidenced extension: the ~2.3x gain per decade has not saturated, so the open
 question is where the returns to training data level off, and whether 1M entities closes the
 remaining gap to text-RAG. Deliverable: the first data-scaling law for an inductive knowledge
 encoder, plus 300k/1M open corpora.

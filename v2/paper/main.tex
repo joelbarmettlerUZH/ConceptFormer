@@ -366,9 +366,9 @@ trained gain, so the effect comes from the learned compression.
 \begin{figure}[t]
   \centering
   \includegraphics[width=\linewidth]{figures/fig_kcurves.png}
-  \caption{Token-budget curves at two corpus scales (frozen Qwen3-0.6B, 3 seeds, identical
-  protocol). Left: strict held-out. Right: \popqa{}, with the 10k$\to$100k accuracy ratio
-  annotated per $k$.}
+  \caption{Token-budget curves at two corpus scales (frozen Qwen3-0.6B, before-entity
+  placement throughout, 3 seeds per cell except the 10k $k{=}8$ cell with 6). Left: strict
+  held-out. Right: \popqa{}, with the 10k$\to$100k accuracy ratio annotated per $k$.}
   \label{fig:kcurves}
 \end{figure}
 
@@ -385,9 +385,11 @@ held-in accuracy falls, consistent with the encoder memorizing individual traini
 less and generalizing the edge-to-concept mapping more.
 
 \paragraph{Token--data substitution.} The two axes interact. The 10k$\to$100k \popqa{} ratio
-falls from $2.05$ at $k{=}8$ to $1.48$ at $k{=}32$ (annotations in
-Figure~\ref{fig:kcurves}). A larger token budget extracts more value from a small corpus and
-partially substitutes for training data.
+rises from $1.35$ at $k{=}1$ to about $2.3$ at $k{=}4$--$8$, then falls to $1.58$ at $k{=}32$
+(annotations in Figure~\ref{fig:kcurves}). Small token budgets cannot exploit more training
+data; at large budgets the extra tokens extract more value from the small corpus, so the token
+budget partially substitutes for training data. The high-$k$ 10k cells carry wide seed spreads
+($\pm$0.04--0.06), so the end of the curve is less settled than its middle.
 
 \begin{figure}[t]
   \centering

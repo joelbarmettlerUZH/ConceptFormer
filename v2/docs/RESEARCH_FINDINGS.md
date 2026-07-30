@@ -1247,3 +1247,16 @@ being re-run at 3 seeds (s0/s1/s2, full 9947 MetaQA + WorldCup) for error bars. 
 data/analysis/adaptation/metaqa_1hop_kl_3seed.json; figure scripts/cf2_figures.py -> fig_adaptation.
 S5.4 gains tab:adaptation + fig:adaptation. Command: recursive_hop.py --hop 1 --objective kl
 --k K --steps 4000 --n-eval 2000 --eval-every 4000 --init-encoder <ckpt>.
+
+**F12 UPDATE (2026-07-30): before_entity 10k k-curve re-anchor (single-placement substitution ratios).**
+The audit (REVIEW_FINDINGS B1/B2) found the 10k k-curve mixed prefix checkpoints (p32/p25/v15)
+while tab:grid and the 100k curve are before_entity, making "0.210 -> 0.477" and "ratio 2.05"
+mutually inconsistent (2.05 came from the prefix cell .232). Retrained the full before_entity
+10k k-curve (be10k_k{1,2,4,16,32}_s{0,1,2}, 72k steps, locked config; k=8 reuses the 6-seed
+v15_be+p34 pool), eval-final each. Result (popqa, mean+/-std):
+  k=1 .150+/-.002  k=2 .159+/-.003  k=4 .172+/-.006  k=8 .210+/-.012  k=16 .263+/-.064  k=32 .339+/-.043
+10k->100k ratio now single-placement: 1.35 (k1) -> ~2.3 (k4-8, peak) -> 1.58 (k32). The
+substitution claim survives with corrected numbers; new shape finding: the ratio RISES to a
+mid-budget peak then falls (small budgets cannot exploit more data). High-k 10k cells are
+high-variance (+/-.04-.06), consistent with F18. fig_kcurves + S5.2 updated; curve_names() in
+cf2_figures.py now returns be10k_*. W&B group kcurve-before-entity-10k.

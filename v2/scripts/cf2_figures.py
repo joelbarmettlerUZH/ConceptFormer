@@ -39,12 +39,13 @@ def acc(names: list[str], eval_set: str, field: str = "concept") -> tuple | None
 
 
 def curve_names(corpus: str, k: int) -> list[str]:
+    # Both corpus scales use before_entity placement so the 10k/100k comparison is
+    # single-placement (the earlier 10k curve mixed prefix checkpoints; see REVIEW_FINDINGS B1/B2).
     if corpus == "10k":
-        if k == 8:
-            return [f"p25_eff32_s{s}" for s in range(3)]
-        if k == 32:
-            return [f"v15_k32_s{s}_best" for s in range(3)]
-        return [f"p32_k{k}_s{s}" for s in range(3)]
+        if k == 8:  # pre-existing 6-seed before_entity cell (two campaigns, same config)
+            return [f"v15_be_k8_s{s}_best" for s in range(3)] + \
+                   [f"p34_before_entity_s{s}" for s in range(3)]
+        return [f"be10k_k{k}_s{s}" for s in range(3)]
     return [f"pc_k{k}_best" if s == 0 else f"pc_k{k}_s{s}_best" for s in range(3)]
 
 
