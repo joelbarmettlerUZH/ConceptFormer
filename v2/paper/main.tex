@@ -49,9 +49,9 @@
   Retrieval grounds language models in external knowledge, but it pays for this grounding on
   every query with hundreds of context tokens. ConceptFormer-2 instead compresses an entity's
   Wikidata neighborhood into $k$ continuous concept tokens that a frozen, instruction-tuned
-  language model consumes in place of retrieved text. A small resampler builds these tokens
-  from the frozen model's own label embeddings, so an unseen entity requires one forward pass
-  and no new parameters. Training needs no labels: the frozen model reading $k$ concept tokens
+  language model consumes in place of retrieved text. A small trained resampler builds these tokens
+  from the frozen model's own label embeddings, so covering an unseen entity takes one encoder
+  pass and no entity-specific parameters. Training needs no labels: the frozen model reading $k$ concept tokens
   is distilled toward the same frozen model reading the facts as text. On \popqa{}, eight
   concept tokens lift a frozen Qwen3-0.6B from 0.10 to 0.48 exact match on unseen entities,
   an accuracy that text-based baselines reach only at about five to six times the token cost.
@@ -60,7 +60,7 @@
   shortfall is non-monotone in model size, with a mid-size valley. In both families, run-to-run
   variance at the largest corpus overtakes the effects under study. Counterfactual probes confirm
   that answers follow the injected graph, and the encoder transfers zero-shot to MetaQA,
-  raising accuracy from 0.06 to 0.34 on a knowledge graph it never saw in training, and
+  raising accuracy from 0.06 to 0.25 on a knowledge graph it never saw in training, and
   reaching a similar ceiling on a second foreign graph. This transfer holds across graphs but
   stops at the label language: an English-trained encoder does not carry over to
   German-labeled graphs. All corpora, checkpoints, and per-item
