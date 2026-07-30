@@ -61,7 +61,9 @@
   variance at the largest corpus overtakes the effects under study. Counterfactual probes confirm
   that answers follow the injected graph, and the encoder transfers zero-shot to MetaQA,
   raising accuracy from 0.06 to 0.25 on a knowledge graph it never saw in training, and
-  reaching a similar ceiling on a second foreign graph. This transfer holds across graphs but
+  reaching a similar ceiling on a second foreign graph. A short fine-tune on the target
+  graph's own questions, with the same label-free objective, lifts MetaQA accuracy to 0.66
+  against a 0.92 reading-the-facts ceiling. This transfer holds across graphs but
   stops at the label language: an English-trained encoder does not carry over to
   German-labeled graphs. All corpora, checkpoints, and per-item
   evaluation outputs are released.
