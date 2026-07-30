@@ -141,13 +141,12 @@ multi-hop concept layer for Apertus.
 cannot do is generate and process the million-entity and per-language training corpora, and run
 the resulting sweep. We size the request bottom-up from a measured baseline: a training run at
 today's scale (100k entities, 0.5B-class backbone) takes about six GPU-hours, and cost grows
-linearly with corpus and model size, so the same run at 1M entities costs roughly ten times
-that, and on the 4B backbone five times. Around 120 runs across the four packages, plus corpus
-generation, per-language teacher extraction, and evaluation, come to roughly 3{,}300 GPU-hours
-including a 25\% contingency; a defined stretch tier (a 3M-entity point, additional languages,
-the combined multilingual multi-hop system on Apertus) brings the request to \textbf{6{,}000
-GPU-hours over six months}. A 2{,}600-hour fallback still delivers the four core results. We
-also request 5 TB of storage for corpora, checkpoints, and per-item evaluation outputs.
+linearly with corpus and model size (1M entities roughly $10\times$, the 4B backbone
+$5\times$). Around 120 runs across the four packages, plus corpus generation, per-language
+teacher extraction, and evaluation, come to roughly 3{,}300 GPU-hours including a 25\%
+contingency; a defined stretch tier brings the request to \textbf{6{,}000 GPU-hours over six
+months}, and a 2{,}600-hour fallback still delivers the four core results. We also request
+5 TB of storage for corpora, checkpoints, and per-item evaluation outputs.
 
 \subsection*{d. Team}
 The team has carried this line of work through peer review once already: v1 \cite{cfv1}
