@@ -4,7 +4,7 @@ Wraps an already-loaded ``ChatModel`` and exposes exactly what the encoder/train
 *frozen* backbone:
 
 - ``embed_labels`` — the real ``LabelEmbedder``: mean-pool the LLM's input embeddings over each
-  label's tokens (inductive, LLM-aligned edge features — see ``docs/MODEL_DESIGN.md`` §1).
+  label's tokens (inductive, LLM-aligned edge features; see the paper's Method section).
 - ``embed_tokens`` — input embeddings for prompt/path token ids (the frozen context the concept
   tokens are spliced into).
 - ``forward_embeds`` — logits from ``inputs_embeds`` (so the student can run on spliced embeddings).

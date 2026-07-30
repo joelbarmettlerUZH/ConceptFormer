@@ -4,7 +4,7 @@ Each 1-hop edge ``(property_label, neighbor_label)`` becomes one feature vector 
 label strings with the *frozen LLM's own* embeddings and fusing them (concat). Using the LLM's
 embeddings keeps features in a space the LLM already understands and makes the encoder **inductive**
 — any new entity/relation with a label works, no per-entity lookup table to cold-start (see
-``docs/MODEL_DESIGN.md`` §1). The center entity's label is embedded separately as explicit
+the paper's Method section). The center entity's label is embedded separately as explicit
 conditioning (the concept tokens are *about* that center).
 
 This module is pure tensor assembly: it depends only on an injected ``LabelEmbedder`` callable, so

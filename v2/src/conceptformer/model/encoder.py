@@ -1,6 +1,6 @@
 """ConceptFormer encoder: an entity's 1-hop neighborhood -> ``k`` concept tokens.
 
-A Perceiver/Flamingo-style latent-query resampler (see ``docs/MODEL_DESIGN.md``): ``k`` learned
+A Perceiver/Flamingo-style latent-query resampler (paper, Method: encoder): ``k`` learned
 latent queries cross-attend over the variable-size set of edge features and emit exactly ``k``
 output vectors, independent of the neighbor count ``N``. Chosen over a GNN (a depth-1 star makes
 message passing redundant) and over an MLP (the input is a variable-size *set*).

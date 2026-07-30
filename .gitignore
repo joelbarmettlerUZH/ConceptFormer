@@ -12,3 +12,4 @@ weights
 wandb
 plots/media
 plots/artifacts
+/memory/

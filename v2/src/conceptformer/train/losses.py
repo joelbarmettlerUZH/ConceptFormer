@@ -1,7 +1,7 @@
 """Distillation losses for ConceptFormer training.
 
 The primary objective is **soft-target KL** over the full vocabulary distribution, teacher-forced
-along the teacher's greedy path (see ``docs/MODEL_DESIGN.md`` §0, §4). We match the teacher's whole
+along the teacher's greedy path (paper, Method: objective). We match the teacher's whole
 belief state — its "dark knowledge" — not just the answer token, so the concept tokens must
 reproduce *how* the frozen-LLM-with-facts distributes probability, position by position.
 

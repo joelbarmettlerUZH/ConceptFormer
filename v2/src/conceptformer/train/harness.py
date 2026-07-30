@@ -1,6 +1,6 @@
 """Train/val splitting for the generalization test.
 
-The central question (``docs/CONCEPTFORMER_V2_EXPLAINED.md`` §8) is whether concept tokens encode an
+The central question (paper, Evaluation protocol) is whether concept tokens encode an
 entity's neighborhood *generally* or merely memorize the training Q->A pairs. The cheap, decisive
 first probe is **held-out questions per entity**: the encoder always reads the full neighborhood
 (it comes from the snapshot, not the QA rows), so holding out some of an entity's questions tests

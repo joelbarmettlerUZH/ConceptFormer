@@ -10,7 +10,7 @@ LLM and matches their next-token distributions along the teacher's greedy path:
 The concept tokens are spliced where the facts text sat (same slot, matched RoPE positions), via a
 placeholder-span split of the chat template (the VLM "image token" trick) so chat special tokens
 stay intact. Examples are processed one at a time and the loss is averaged — correctness over speed;
-batched/padded forward is a later optimization. See ``docs/MODEL_DESIGN.md`` §0, §5.
+batched/padded forward is a later optimization. See the paper's Method section.
 """
 
 from __future__ import annotations

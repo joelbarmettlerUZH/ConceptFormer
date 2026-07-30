@@ -1,6 +1,6 @@
 """Splice concept tokens into the frozen LLM's input sequence.
 
-Three primitives the trainer/predictor compose (see ``docs/MODEL_DESIGN.md`` §2-3):
+Three primitives the trainer/predictor compose (paper, Method: injection):
 
 - ``ConceptGate`` — a zero-init, tanh, per-token gate on the concept embeddings. At step 0 the
   gate is 0, so the injected vectors are zero and the student's distribution is *exactly* the

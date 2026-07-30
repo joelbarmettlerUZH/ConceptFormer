@@ -356,12 +356,21 @@ axa.legend(fontsize=9)
 # Panel B: %German answers vs model size at k8, English vs German concept labels.
 # 0.6B is 3-seed (error bar); 1.7B/4B are single seed.
 sizes = ["0.6B", "1.7B", "4B"]
+
+
+def single_seed(pattern: str) -> tuple[float, float]:
+    cell = ml_cell(pattern)
+    if cell is None:
+        raise FileNotFoundError(pattern)
+    return cell[1], 0.0
+
+
 en_k8 = [agg(ml_seeds(en_seeds_06b(8)), 1),
-         (ml_cell("q3b17_100k_k8_s0_best__popqa_desys_enlabels_1.7b_k8__localized__sys-de")[1], 0),
-         (ml_cell("q3b4_100k_k8_s0_best__popqa_desys_enlabels_4b_k8__localized__sys-de")[1], 0)]
+         single_seed("q3b17_100k_k8_s0_best__popqa_desys_enlabels_1.7b_k8__localized__sys-de"),
+         single_seed("q3b4_100k_k8_s0_best__popqa_desys_enlabels_4b_k8__localized__sys-de")]
 de_k8 = [agg(ml_seeds(de_seeds_06b(8)), 1),
-         (ml_cell("q3b17_100k_k8_s0_best__popqa_fullde_1.7b_k8__localized__sys-de")[1], 0),
-         (ml_cell("q3b4_100k_k8_s0_best__popqa_fullde_4b_k8__localized__sys-de")[1], 0)]
+         single_seed("q3b17_100k_k8_s0_best__popqa_fullde_1.7b_k8__localized__sys-de"),
+         single_seed("q3b4_100k_k8_s0_best__popqa_fullde_4b_k8__localized__sys-de")]
 axb.errorbar(sizes, [v[0] for v in en_k8], yerr=[v[1] for v in en_k8], fmt="o-", color=BLUE,
              capsize=3, label="English-labeled concepts")
 axb.errorbar(sizes, [v[0] for v in de_k8], yerr=[v[1] for v in de_k8], fmt="s--", color=ORANGE,
