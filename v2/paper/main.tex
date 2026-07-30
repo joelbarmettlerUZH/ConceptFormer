@@ -365,15 +365,17 @@ trained gain, so the effect comes from the learned compression.
 
 \begin{figure}[t]
   \centering
-  \includegraphics[width=\linewidth]{figures/fig_kcurves.png}
-  \caption{Token-budget curves at two corpus scales (frozen Qwen3-0.6B, before-entity
-  placement throughout, 3 seeds per cell except the 10k $k{=}8$ cell with 6). Left: strict
-  held-out. Right: \popqa{}, with the 10k$\to$100k accuracy ratio annotated per $k$.}
-  \label{fig:kcurves}
+  \includegraphics[width=\linewidth]{figures/fig_scaling.png}
+  \caption{The three scaling axes (before-entity placement throughout, 3 seeds per cell except
+  the 10k $k{=}8$ cell with 6). Left, middle: token-budget curves at two corpus scales (frozen
+  Qwen3-0.6B) on strict held-out and \popqa{}, with the 10k$\to$100k accuracy ratio annotated
+  per $k$. Right: \popqa{} margin over each frozen backbone's own base at $k{=}8$ for both
+  corpus sizes and both model families; cell values and seed counts in Table~\ref{tab:grid}.}
+  \label{fig:scaling}
 \end{figure}
 
 \paragraph{Token axis.} On the primary Qwen3-0.6B backbone, accuracy is monotone in $k$
-through $k{=}32$ on both corpora (Table~\ref{tab:kfamily}, Figure~\ref{fig:kcurves}). Returns per token diminish: $k{=}8$
+through $k{=}32$ on both corpora (Table~\ref{tab:kfamily}, Figure~\ref{fig:scaling}). Returns per token diminish: $k{=}8$
 reaches about 89\% of the $k{=}32$ \popqa{} accuracy with a quarter of the tokens. The best
 budget therefore depends on how much context a deployment is willing to spend, and the curve
 shows no plateau up to $k{=}32$.
@@ -386,18 +388,11 @@ less and generalizing the edge-to-concept mapping more.
 
 \paragraph{Token--data substitution.} The two axes interact. The 10k$\to$100k \popqa{} ratio
 rises from $1.35$ at $k{=}1$ to about $2.3$ at $k{=}4$--$8$, then falls to $1.58$ at $k{=}32$
-(annotations in Figure~\ref{fig:kcurves}). Small token budgets cannot exploit more training
+(annotations in Figure~\ref{fig:scaling}, middle). Small token budgets cannot exploit more training
 data; at large budgets the extra tokens extract more value from the small corpus, so the token
 budget partially substitutes for training data. The high-$k$ 10k cells carry wide seed spreads
 ($\pm$0.04--0.06), so the end of the curve is less settled than its middle.
 
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=0.62\linewidth]{figures/fig_grid.png}
-  \caption{\popqa{} margin over each frozen backbone's own base accuracy at $k{=}8$, for both
-  training-corpus sizes. Cell values and seed counts are given in Table~\ref{tab:grid}.}
-  \label{fig:grid}
-\end{figure}
 
 \begin{table}[t]
   \caption{The data $\times$ model grid at $k{=}8$: full-\popqa{} accuracy and margin over each
@@ -422,7 +417,7 @@ budget partially substitutes for training data. The high-$k$ 10k cells carry wid
 \end{table}
 
 \paragraph{Model axis.} We repeat the data transect across the Qwen3 family, each backbone
-with its own teacher-relative corpus and brackets (Figure~\ref{fig:grid},
+with its own teacher-relative corpus and brackets (Figure~\ref{fig:scaling}, right;
 Table~\ref{tab:grid}). A larger frozen model knows more of \popqa{} from its weights, so the
 grid asks whether it gains less from injection and whether more training data closes the gap.
 It gains less, and data does not close the gap. The 1.7B margin is roughly half the 0.6B
@@ -532,12 +527,15 @@ accuracy of the $k{=}8$ model varies with a standard deviation of at most 1.1\,p
 
 \begin{figure}[t]
   \centering
-  \includegraphics[width=0.6\linewidth]{figures/fig_transfer.png}
-  \caption{Share of the base-to-RAG gap closed vs.\ $k$: the home graph (Wikidata/\popqa{})
-  and two zero-shot foreign graphs, MetaQA (movies) and WorldCup2014 (sports). Three seeds
-  each; bars are $\pm$1 std. Zero-shot transfer tracks the home curve at small $k$ but
-  plateaus near 20--23\% while the home graph climbs to 51\%, so the returns to capacity above
-  $k{\approx}4$ are largely graph-specific.}
+  \includegraphics[width=\linewidth]{figures/fig_transfer.png}
+  \caption{Cross-graph transfer, 3 seeds throughout; bars are $\pm$1 std. Left: share of the
+  base-to-RAG gap closed vs.\ $k$ on the home graph (Wikidata/\popqa{}) and two zero-shot
+  foreign graphs, MetaQA (movies) and WorldCup2014 (sports); transfer tracks the home curve at
+  small $k$ but plateaus near 20--23\% while the home graph climbs to 51\%, so the returns to
+  capacity above $k{\approx}4$ are largely graph-specific. Right: in-domain adaptation on
+  MetaQA restores the $k$-curve; zero-shot accuracy is nearly flat in $k$, while a short
+  label-free KL fine-tune on MetaQA's own questions recovers the returns to capacity, reaching
+  0.66 at $k{=}32$ against a 0.92 RAG ceiling.}
   \label{fig:transfer}
 \end{figure}
 
@@ -604,20 +602,10 @@ graph, though only its low-capacity part transfers without adaptation.
   \end{tabular}
 \end{table}
 
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=0.6\linewidth]{figures/fig_adaptation.png}
-  \caption{In-domain adaptation restores the $k$-curve on the foreign graph. Zero-shot transfer
-  accuracy is nearly flat in $k$; a short label-free KL fine-tune on MetaQA's own questions
-  recovers the returns to capacity, reaching 0.66 at $k{=}32$ against a 0.92 RAG ceiling. Three
-  seeds each; bars are $\pm$1 std.}
-  \label{fig:adaptation}
-\end{figure}
-
 In-domain adaptation lifts accuracy well above the zero-shot result with the same label-free KL
 objective. Continuing to train the encoder on MetaQA's own 1-hop questions (distilling the
 frozen model reading the verbalized facts, with no QA labels in the loss) lifts every budget
-well above its zero-shot start (Table~\ref{tab:adaptation}, Figure~\ref{fig:adaptation}). The
+well above its zero-shot start (Table~\ref{tab:adaptation}; Figure~\ref{fig:transfer}, right). The
 gain is more than a constant offset. Zero-shot, accuracy is nearly flat in $k$, around 0.2
 across the sweep, as the extra concept tokens carry Wikidata-specific structure the movie graph
 cannot use. Adaptation recovers the token budget: adapted accuracy rises monotonically with $k$

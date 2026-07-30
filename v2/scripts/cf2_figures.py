@@ -50,7 +50,9 @@ def curve_names(corpus: str, k: int) -> list[str]:
 
 
 # ---------------------------------------------------------------- Fig 3: matched k-curves
-fig, axes = plt.subplots(1, 2, figsize=(11, 4.4), sharex=True)
+# Panels 1-2 (k-curves) and panel 3 (data x model grid) share one row so the paper spends one
+# float on the scaling story instead of two (layout pass 2026-07-30).
+fig, axes = plt.subplots(1, 3, figsize=(15.5, 4.2))
 for ax, es, title in [
     (axes[0], "held_out", "Held-out questions (trained entities)"),
     (axes[1], "popqa", "PopQA (unseen entities, full benchmark)"),
@@ -78,11 +80,8 @@ for k in (8, 16, 32):
         axes[1].annotate(f"$\\times${hi[0] / lo[0]:.2f}", xy=(k, (lo[0] + hi[0]) / 2),
                          fontsize=8, color=DARK, ha="center")
 axes[0].set_ylabel("greedy exact-match accuracy")
-fig.tight_layout()
-fig.savefig(OUT / "fig_kcurves.png", dpi=150, bbox_inches="tight")
-print("wrote fig_kcurves.png")
 
-# ------------------------------------------------------- Fig 4: data x model grid (margins)
+# ------------------------------------------------- panel 3: data x model grid (margins)
 GRID = {  # backbone -> corpus -> checkpoint names (k=8, before_entity)
     "Qwen3-0.6B": {
         "10k": [f"v15_be_k8_s{s}_best" for s in range(3)]
@@ -110,7 +109,7 @@ GRID = {  # backbone -> corpus -> checkpoint names (k=8, before_entity)
         "100k": [f"gemma3-4b_100k_k8_s{s}_best" for s in range(3)],
     },
 }
-fig2, ax = plt.subplots(figsize=(6.2, 4.2))
+ax = axes[2]
 X = {"10k": 10_000, "100k": 100_000}
 for (backbone, cells), color, marker in zip(
     GRID.items(), [BLUE, GREEN, ORANGE, BLUE, GREEN, ORANGE], "osDosD", strict=True
@@ -131,12 +130,12 @@ ax.set_xscale("log")
 ax.set_xticks(list(X.values()), list(X.keys()))
 ax.set_xlabel("training entities")
 ax.set_ylabel("PopQA margin over own base (pt)")
-ax.set_title("Injected-knowledge margin: data axis per frozen backbone ($k$=8)", fontsize=10)
+ax.set_title("Margin over own base per backbone ($k$=8)", fontsize=10)
 ax.grid(True, alpha=0.25)
-ax.legend(fontsize=9)
-fig2.tight_layout()
-fig2.savefig(OUT / "fig_grid.png", dpi=150, bbox_inches="tight")
-print("wrote fig_grid.png")
+ax.legend(fontsize=8)
+fig.tight_layout()
+fig.savefig(OUT / "fig_scaling.png", dpi=150, bbox_inches="tight")
+print("wrote fig_scaling.png")
 
 # ----------------------------------------------------------- Fig 5: causal probes vs k
 PROBES = ROOT / "data/analysis/probes"
@@ -253,7 +252,8 @@ def transfer_curve(benchmark: str) -> tuple[list[int], list[float], list[float]]
 
 mq_x, mq_y, mq_e = transfer_curve("metaqa_1hop_full")
 wc_x, wc_y, wc_e = transfer_curve("worldcup_1hop")
-fig4, ax = plt.subplots(figsize=(6.2, 4.0))
+# Transfer (left) and in-domain adaptation (right) share one float (layout pass 2026-07-30).
+fig4, (ax, axb) = plt.subplots(1, 2, figsize=(12.5, 4.0))
 ax.errorbar(home_x, home_y, yerr=home_e, fmt="o-", color=BLUE, capsize=3,
             label="Wikidata (home): PopQA, unseen entities")
 ax.errorbar(mq_x, mq_y, yerr=mq_e, fmt="D--", color=ORANGE, capsize=3,
@@ -268,36 +268,31 @@ ax.set_title("Same encoder, three graphs: zero-shot transfer plateaus near\n"
              "20-23% gap closure, vs. 51% on the home graph", fontsize=10)
 ax.grid(True, alpha=0.25)
 ax.legend(fontsize=9, loc="upper left")
+
+# ------------------------- right panel: in-domain adaptation restores the k-curve (MetaQA)
+ADAPT = ROOT / "data/analysis/adaptation/metaqa_1hop_kl_3seed.json"
+a = json.loads(ADAPT.read_text())
+aks = sorted(int(k) for k in a)
+zs_y = [a[str(k)]["zeroshot_mean"] for k in aks]
+zs_e = [a[str(k)]["zeroshot_std"] for k in aks]
+ft_y = [a[str(k)]["finetuned_mean"] for k in aks]
+ft_e = [a[str(k)]["finetuned_std"] for k in aks]
+axb.errorbar(aks, ft_y, yerr=ft_e, fmt="D-", color=ORANGE, capsize=3,
+             label="in-domain adapted (label-free KL)")
+axb.errorbar(aks, zs_y, yerr=zs_e, fmt="o--", color=DARK, capsize=3,
+             label="zero-shot transfer")
+axb.set_xscale("log", base=2)
+axb.set_xticks(aks, [str(k) for k in aks])
+axb.set_xlabel("concept tokens $k$")
+axb.set_ylabel("MetaQA 1-hop accuracy")
+axb.set_title("Adaptation restores the $k$-curve: zero-shot is flat in $k$,\n"
+              "label-free in-domain KL recovers the token budget", fontsize=10)
+axb.set_ylim(0, 0.75)
+axb.grid(True, alpha=0.25)
+axb.legend(fontsize=9, loc="upper left")
 fig4.tight_layout()
 fig4.savefig(OUT / "fig_transfer.png", dpi=150, bbox_inches="tight")
 print("wrote fig_transfer.png")
-
-# ---------------------------------- Fig 6b: in-domain adaptation restores the k-curve (MetaQA)
-ADAPT = ROOT / "data/analysis/adaptation/metaqa_1hop_kl_3seed.json"
-if ADAPT.exists():
-    a = json.loads(ADAPT.read_text())
-    aks = sorted(int(k) for k in a)
-    zs_y = [a[str(k)]["zeroshot_mean"] for k in aks]
-    zs_e = [a[str(k)]["zeroshot_std"] for k in aks]
-    ft_y = [a[str(k)]["finetuned_mean"] for k in aks]
-    ft_e = [a[str(k)]["finetuned_std"] for k in aks]
-    fig4b, axb = plt.subplots(figsize=(6.2, 4.0))
-    axb.errorbar(aks, ft_y, yerr=ft_e, fmt="D-", color=ORANGE, capsize=3,
-                 label="in-domain adapted (label-free KL)")
-    axb.errorbar(aks, zs_y, yerr=zs_e, fmt="o--", color=DARK, capsize=3,
-                 label="zero-shot transfer")
-    axb.set_xscale("log", base=2)
-    axb.set_xticks(aks, [str(k) for k in aks])
-    axb.set_xlabel("concept tokens $k$")
-    axb.set_ylabel("MetaQA 1-hop accuracy")
-    axb.set_title("Adaptation restores the $k$-curve: zero-shot is flat in $k$,\n"
-                  "label-free in-domain KL recovers the token budget", fontsize=10)
-    axb.set_ylim(0, 0.75)
-    axb.grid(True, alpha=0.25)
-    axb.legend(fontsize=9, loc="upper left")
-    fig4b.tight_layout()
-    fig4b.savefig(OUT / "fig_adaptation.png", dpi=150, bbox_inches="tight")
-    print("wrote fig_adaptation.png")
 
 # ------------------------------------------ Fig 7: cross-lingual (German) label-language effect
 ML = ROOT / "data/analysis/multilingual"
